@@ -168,24 +168,40 @@ impl App {
     {
         let mut header = Pane::new(1, 1, cols, 1, 255, 236);
         header.wrap = false;
-        let content_h = rows.saturating_sub(3);
+        // Leave 4 rows outside the main content area: 1 header + 1 border top
+        // + 1 border bottom + 1 footer. Panes at y=3 with h=rows-4.
+        let content_h = rows.saturating_sub(4);
         let mut list = Pane::new(2, 3, 50, content_h, 252, 0);
         list.wrap = false;
-        list.border = true;
+        list.border = true; // active on startup
+        list.border_fg = Some(81);
         let mut genres = Pane::new(53, 3, 16, content_h, 248, 232);
         genres.wrap = false;
+        genres.border_fg = Some(81);
         let wish_h = rows / 2 - 1;
         let mut wish = Pane::new(70, 3, 30, wish_h, 64, 232);
         wish.wrap = false;
+        wish.border_fg = Some(81);
         let dump_y = 3 + wish_h + 1;
         let mut dump = Pane::new(70, dump_y, 30, content_h.saturating_sub(wish_h + 1), 130, 232);
         dump.wrap = false;
+        dump.border_fg = Some(81);
         let detail_x = 102;
         let mut detail = Pane::new(detail_x, 3, cols.saturating_sub(detail_x), content_h, 255, 0);
+        // Wrap is fine — crust now handles OSC 8 across visual wraps.
         detail.wrap = true;
         let mut footer = Pane::new(1, rows, cols, 1, 255, 236);
         footer.wrap = false;
         (header, list, genres, wish, dump, detail, footer)
+    }
+
+    /// Set border only on the currently focused pane (IMDB pattern).
+    /// Clears border on others so they don't compete visually.
+    fn apply_focus_border(&mut self) {
+        self.list.border = self.focus == Focus::List;
+        self.genres.border = self.focus == Focus::Genres;
+        self.wish.border = self.focus == Focus::Wish;
+        self.dump.border = self.focus == Focus::Dump;
     }
 
     fn load_all(&mut self) {
@@ -333,12 +349,9 @@ impl App {
                 else if self.cfg.genres_exclude.contains(g) { style::fg("- ", 196) }
                 else { "  ".into() };
             let focused = self.focus == Focus::Genres && i == self.genre_idx;
-            let text = format!("{}{}", mark, g);
-            if focused {
-                lines.push(style::underline(&style::bold(&text)));
-            } else {
-                lines.push(text);
-            }
+            // Underline only the name itself, not the leading marker.
+            let name = if focused { style::underline(&style::bold(g)) } else { g.clone() };
+            lines.push(format!("{}{}", mark, name));
         }
         self.genres.set_text(&lines.join("\n"));
         self.genres.ix = self.compute_scroll(self.genre_idx, self.all_genres.len(), self.genres.h as usize);
@@ -400,7 +413,11 @@ impl App {
             .or_else(|| item.as_ref().map(|it| it.title.clone()))
             .unwrap_or_else(|| id.clone());
         lines.push(style::bold(&style::fg(&title, 226)));
-        lines.push(style::fg(&format!("imdb.com/title/{}/", id), 240));
+        let url = format!("https://www.imdb.com/title/{}/", id);
+        let visible = format!("imdb.com/title/{}/", id);
+        // OSC 8 hyperlink: clickable in kitty/foot/wezterm/iTerm2
+        let link = format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, visible);
+        lines.push(style::fg(&style::underline(&link), 240));
         lines.push(String::new());
 
         if let Some(d) = det.as_ref() {
@@ -551,6 +568,7 @@ impl App {
             Focus::Wish => Focus::Dump,
             Focus::Dump => Focus::List,
         };
+        self.apply_focus_border();
     }
     fn prev_focus(&mut self) {
         self.focus = match self.focus {
@@ -559,6 +577,7 @@ impl App {
             Focus::Wish => Focus::Genres,
             Focus::Dump => Focus::Wish,
         };
+        self.apply_focus_border();
     }
 
     fn move_focus(&mut self, n: i32) {
