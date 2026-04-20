@@ -130,6 +130,13 @@ struct App {
 
     image_display: Option<glow::Display>,
     current_poster: Option<String>,
+
+    /// Adjacent poster prefetch state. Keeps us from spawning a new thread
+    /// when one is already running for the same neighborhood.
+    prefetch_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Poster downloads still in flight. When they finish and the user is
+    /// still looking at that id, we trigger a re-render.
+    poster_rx: Option<mpsc::Receiver<String>>,
 }
 
 enum ScrapeResult {
@@ -160,6 +167,8 @@ impl App {
             status_msg: None,
             image_display: None,
             current_poster: None,
+            prefetch_busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            poster_rx: None,
         }
     }
 
@@ -196,12 +205,21 @@ impl App {
     }
 
     /// Set border only on the currently focused pane (IMDB pattern).
-    /// Clears border on others so they don't compete visually.
+    /// Explicitly erases the border glyphs on newly-unfocused panes so the
+    /// old frame doesn't linger on screen.
     fn apply_focus_border(&mut self) {
-        self.list.border = self.focus == Focus::List;
-        self.genres.border = self.focus == Focus::Genres;
-        self.wish.border = self.focus == Focus::Wish;
-        self.dump.border = self.focus == Focus::Dump;
+        // Clear any pane that currently has a border but shouldn't.
+        if self.list.border && self.focus != Focus::List { self.list.border_clear(); self.list.border = false; }
+        if self.genres.border && self.focus != Focus::Genres { self.genres.border_clear(); self.genres.border = false; }
+        if self.wish.border && self.focus != Focus::Wish { self.wish.border_clear(); self.wish.border = false; }
+        if self.dump.border && self.focus != Focus::Dump { self.dump.border_clear(); self.dump.border = false; }
+        // Enable on the new focus.
+        match self.focus {
+            Focus::List => self.list.border = true,
+            Focus::Genres => self.genres.border = true,
+            Focus::Wish => self.wish.border = true,
+            Focus::Dump => self.dump.border = true,
+        }
     }
 
     fn load_all(&mut self) {
@@ -325,14 +343,16 @@ impl App {
             let (title, rating) = item.map(|it| (it.title.clone(), it.rating)).unwrap_or_default();
             let year = item.map(|it| self.item_year(it)).unwrap_or(0);
             let year_s = if year > 0 { format!(" ({})", year) } else { String::new() };
-            let row = format!("{:>4.1}  {}{}", rating, title, year_s);
-            let marker = if i == self.list_idx && self.focus == Focus::List { "→ " } else { "  " };
-            let line = format!("{}{}", marker, row);
-            if i == self.list_idx && self.focus == Focus::List {
-                lines.push(style::bold(&style::underline(&line)));
+            let focused = i == self.list_idx && self.focus == Focus::List;
+            // Underline only the title (+ year), not the rating or the ">" marker.
+            let title_part = format!("{}{}", title, year_s);
+            let title_styled = if focused {
+                style::bold(&style::underline(&title_part))
             } else {
-                lines.push(line);
-            }
+                title_part
+            };
+            let marker = if focused { "\u{2192} " } else { "  " };
+            lines.push(format!("{}{:>4.1}  {}", marker, rating, title_styled));
         }
         self.list.set_text(&lines.join("\n"));
         self.list.ix = self.compute_scroll(self.list_idx, self.filtered.len(), self.list.h as usize);
@@ -366,12 +386,9 @@ impl App {
                 .or_else(|| self.details.get(id).map(|d| d.title.clone()))
                 .unwrap_or_else(|| id.clone());
             let focused = self.focus == Focus::Wish && i == self.wish_idx;
-            let line = if focused {
-                style::underline(&style::bold(&format!("→ {}", title)))
-            } else {
-                format!("  {}", title)
-            };
-            lines.push(line);
+            let name = if focused { style::bold(&style::underline(&title)) } else { title };
+            let marker = if focused { "\u{2192} " } else { "  " };
+            lines.push(format!("{}{}", marker, name));
         }
         self.wish.set_text(&lines.join("\n"));
         self.wish.ix = self.compute_scroll(self.wish_idx, ids.len(), self.wish.h as usize);
@@ -386,12 +403,9 @@ impl App {
                 .or_else(|| self.details.get(id).map(|d| d.title.clone()))
                 .unwrap_or_else(|| id.clone());
             let focused = self.focus == Focus::Dump && i == self.dump_idx;
-            let line = if focused {
-                style::underline(&style::bold(&format!("→ {}", title)))
-            } else {
-                format!("  {}", title)
-            };
-            lines.push(line);
+            let name = if focused { style::bold(&style::underline(&title)) } else { title };
+            let marker = if focused { "\u{2192} " } else { "  " };
+            lines.push(format!("{}{}", marker, name));
         }
         self.dump.set_text(&lines.join("\n"));
         self.dump.ix = self.compute_scroll(self.dump_idx, ids.len(), self.dump.h as usize);
@@ -468,6 +482,9 @@ impl App {
             } else {
                 self.clear_poster();
             }
+            // Background-prefetch posters for nearby list entries so
+            // cursor navigation feels snappy.
+            self.prefetch_adjacent_posters();
         } else {
             self.clear_poster();
         }
@@ -492,41 +509,87 @@ impl App {
     }
 
     fn show_poster(&mut self, id: &str, url: &str) {
-        // Cache to ~/.watchit/data/<id>.jpg
+        // Disk cache at ~/.watchit/data/<id>.jpg; if present, show instantly.
+        // If missing, spawn background download and clear the poster area so
+        // the UI stays responsive. Poll in poll_async() will render once it
+        // lands if the user is still on the same item.
         let path = config::data_dir().join(format!("{}.jpg", id));
-        if !path.exists() {
+        if path.exists() {
+            self.show_poster_path(id, &path);
+            return;
+        }
+        self.clear_poster();
+        self.spawn_poster_download(id.to_string(), url.to_string(), path);
+    }
+
+    fn spawn_poster_download(&mut self, id: String, url: String, path: std::path::PathBuf) {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
             let agent = ureq::AgentBuilder::new()
                 .timeout_connect(std::time::Duration::from_secs(5))
-                .timeout_read(std::time::Duration::from_secs(15))
+                .timeout_read(std::time::Duration::from_secs(20))
                 .redirects(5)
                 .build();
-            if let Ok(resp) = agent.get(url).call() {
+            if let Ok(resp) = agent.get(&url).call() {
                 let mut bytes = Vec::new();
-                if std::io::Read::read_to_end(&mut resp.into_reader(), &mut bytes).is_ok() && bytes.len() > 100 {
+                if std::io::Read::read_to_end(&mut resp.into_reader(), &mut bytes).is_ok()
+                    && bytes.len() > 100
+                {
                     let _ = std::fs::write(&path, &bytes);
                 }
             }
+            let _ = tx.send(id);
+        });
+        self.poster_rx = Some(rx);
+    }
+
+    /// Prefetch poster JPGs for adjacent items in the filtered list so that
+    /// when the user moves the cursor the next few rows already have their
+    /// posters on disk. Non-blocking; skips entries that already have a
+    /// cached JPG and coalesces overlapping prefetch waves.
+    fn prefetch_adjacent_posters(&mut self) {
+        use std::sync::atomic::Ordering;
+        if self.prefetch_busy.load(Ordering::Relaxed) { return; }
+
+        // Build the job list on the main thread (no borrow of self from the
+        // worker).
+        let mut jobs: Vec<(String, String, std::path::PathBuf)> = Vec::new();
+        let offsets = [1i32, 2, 3, -1, -2];
+        let len = self.filtered.len() as i32;
+        for off in offsets {
+            let idx = self.list_idx as i32 + off;
+            if idx < 0 || idx >= len { continue; }
+            let id = self.filtered[idx as usize].clone();
+            let path = config::data_dir().join(format!("{}.jpg", id));
+            if path.exists() { continue; }
+            let url = self.details.get(&id)
+                .map(|d| d.poster_url.clone())
+                .unwrap_or_default();
+            if !url.is_empty() { jobs.push((id, url, path)); }
         }
-        if !path.exists() { self.clear_poster(); return; }
-        if self.current_poster.as_deref() == Some(id) { return; }
+        if jobs.is_empty() { return; }
 
-        self.clear_poster();
-        let display = glow::Display::new();
-        if !display.supported() { return; }
-
-        // Put poster in bottom half of the detail pane.
-        let top = 15u16;
-        let img_x = self.detail.x;
-        let img_y = self.detail.y + top;
-        let img_w = self.detail.w.saturating_sub(2);
-        let img_h = self.detail.h.saturating_sub(top + 1);
-        if img_h < 4 { return; }
-
-        self.image_display = Some(display);
-        if let Some(ref mut disp) = self.image_display {
-            disp.show(path.to_string_lossy().as_ref(), img_x, img_y, img_w, img_h);
-        }
-        self.current_poster = Some(id.to_string());
+        let busy = self.prefetch_busy.clone();
+        busy.store(true, Ordering::Relaxed);
+        std::thread::spawn(move || {
+            let agent = ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(5))
+                .timeout_read(std::time::Duration::from_secs(20))
+                .redirects(5)
+                .build();
+            for (_id, url, path) in jobs {
+                if path.exists() { continue; }
+                if let Ok(resp) = agent.get(&url).call() {
+                    let mut bytes = Vec::new();
+                    if std::io::Read::read_to_end(&mut resp.into_reader(), &mut bytes).is_ok()
+                        && bytes.len() > 100
+                    {
+                        let _ = std::fs::write(&path, &bytes);
+                    }
+                }
+            }
+            busy.store(false, Ordering::Relaxed);
+        });
     }
 
     fn clear_poster(&mut self) {
@@ -879,6 +942,22 @@ impl App {
 
     fn poll_async(&mut self) -> bool {
         let mut changed = false;
+        if let Some(rx) = self.poster_rx.take() {
+            match rx.try_recv() {
+                Ok(finished_id) => {
+                    // If user is still viewing this id, show the new poster.
+                    if self.current_id().as_deref() == Some(finished_id.as_str()) {
+                        let path = config::data_dir().join(format!("{}.jpg", finished_id));
+                        if path.exists() {
+                            self.show_poster_path(&finished_id, &path);
+                        }
+                    }
+                    changed = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => { self.poster_rx = Some(rx); }
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
         if let Some(rx) = self.scrape_rx.take() {
             match rx.try_recv() {
                 Ok(ScrapeResult::Full(movies, series)) => {
