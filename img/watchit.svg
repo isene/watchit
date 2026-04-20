@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#0a0a14"/>
+    </linearGradient>
+    <linearGradient id="rust" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f74c00"/>
+      <stop offset="100%" style="stop-color:#b7410e"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2a2a3e"/>
+      <stop offset="100%" style="stop-color:#15152a"/>
+    </linearGradient>
+  </defs>
+  <style>
+    @keyframes blink { 0%, 45%, 55%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+    @keyframes twinkle { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+    @keyframes popcorn { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+    .eye { animation: blink 4s ease-in-out infinite; transform-origin: center; }
+    .tw { animation: twinkle 2s ease-in-out infinite; }
+    .tw2 { animation: twinkle 2s ease-in-out 0.7s infinite; }
+    .tw3 { animation: twinkle 2s ease-in-out 1.3s infinite; }
+    .kernel { animation: popcorn 1.8s ease-in-out infinite; transform-origin: center; }
+    .kernel2 { animation: popcorn 1.8s ease-in-out 0.5s infinite; transform-origin: center; }
+    .kernel3 { animation: popcorn 1.8s ease-in-out 0.9s infinite; transform-origin: center; }
+  </style>
+
+  <!-- Background -->
+  <circle cx="128" cy="128" r="120" fill="url(#bg)" stroke="url(#rust)" stroke-width="3"/>
+
+  <!-- Twinkling stars -->
+  <circle class="tw" cx="52" cy="60" r="1.6" fill="#ffffff"/>
+  <circle class="tw2" cx="208" cy="66" r="1.2" fill="#ffffff"/>
+  <circle class="tw3" cx="40" cy="196" r="1.4" fill="#ffffff"/>
+  <circle class="tw" cx="216" cy="210" r="1.3" fill="#ffffff"/>
+  <circle class="tw2" cx="70" cy="214" r="1.0" fill="#ffffff"/>
+  <circle class="tw3" cx="196" cy="46" r="1.1" fill="#ffffff"/>
+
+  <!-- Screen (TV/cinema) -->
+  <rect x="54" y="70" width="148" height="94" rx="8" ry="8"
+        fill="url(#screen)" stroke="url(#rust)" stroke-width="2.5"/>
+
+  <!-- Stand -->
+  <rect x="110" y="164" width="36" height="6" fill="url(#rust)"/>
+  <rect x="96" y="170" width="64" height="4" rx="2" fill="url(#rust)"/>
+
+  <!-- Play triangle on screen -->
+  <polygon points="108,98 108,142 152,120" fill="#ffe9a8" opacity="0.95"/>
+
+  <!-- Eye/iris lens at top corners (playful "watchit") -->
+  <g class="eye">
+    <circle cx="72" cy="86" r="6" fill="#ffffff" opacity="0.85"/>
+    <circle cx="72" cy="86" r="3" fill="#111"/>
+  </g>
+  <g class="eye">
+    <circle cx="184" cy="86" r="6" fill="#ffffff" opacity="0.85"/>
+    <circle cx="184" cy="86" r="3" fill="#111"/>
+  </g>
+
+  <!-- Popcorn kernels bouncing above the screen -->
+  <g class="kernel">
+    <circle cx="80" cy="55" r="4" fill="#ffe9a8" stroke="#f74c00" stroke-width="1"/>
+  </g>
+  <g class="kernel2">
+    <circle cx="128" cy="48" r="4.5" fill="#ffe9a8" stroke="#f74c00" stroke-width="1"/>
+  </g>
+  <g class="kernel3">
+    <circle cx="176" cy="55" r="4" fill="#ffe9a8" stroke="#f74c00" stroke-width="1"/>
+  </g>
+</svg>
