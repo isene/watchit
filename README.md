@@ -10,6 +10,12 @@ A fast terminal browser for discovering and managing movies and TV series. Scrap
 
 <br clear="left"/>
 
+## Screenshot
+
+![Screenshot](img/screenshot.png)
+
+*Movie browser with genre filter, wishlist/dump pane, and poster preview.*
+
 ## Install
 
 ```bash
