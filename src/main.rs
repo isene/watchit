@@ -26,6 +26,7 @@ fn main() {
     let cfg = Config::load();
 
     Crust::init();
+    Crust::set_app_identity("Watchit");
     let mut app = App::new(cfg);
     app.load_all();
 
