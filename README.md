@@ -4,7 +4,7 @@
 
 ![Rust](https://img.shields.io/badge/language-Rust-f74c00) ![License](https://img.shields.io/badge/license-Unlicense-green) ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue) [![GitHub release](https://img.shields.io/github/v/release/isene/watchit)](https://github.com/isene/watchit/releases) [![GitHub stars](https://img.shields.io/github/stars/isene/watchit.svg)](https://github.com/isene/watchit/stargazers) ![Stay Amazing](https://img.shields.io/badge/Stay-Amazing-important)
 
-A fast terminal browser for discovering and managing movies and TV series. Scrapes IMDb Top 250, tracks streaming availability via TMDb, keeps your own wish and dump lists, renders posters inline. Rust feature port of [IMDB-terminal](https://github.com/isene/IMDB), built on [crust](https://github.com/isene/crust) and [glow](https://github.com/isene/glow).
+A fast terminal browser for discovering and managing movies and TV series. Pulls top-rated and popular lists from TMDB, keeps your own wish and dump lists, renders posters inline. Rust feature port of [IMDB-terminal](https://github.com/isene/IMDB), built on [crust](https://github.com/isene/crust) and [glow](https://github.com/isene/glow).
 
 > *"Cut down the time spent searching in favor of time spent watching and cuddling."*
 
@@ -37,30 +37,51 @@ cargo build --release
 
 ## First Run
 
-On first launch, watchit looks for existing data from the Ruby [IMDB-terminal](https://github.com/isene/IMDB) gem:
+watchit requires a free TMDB API key. Get one at
+<https://www.themoviedb.org/settings/api> (signup → "Create" under
+API → choose "Developer" → fill in the form, any plausible app
+description works). Save the v3 key.
 
-- `~/.imdb.yml` → config translated to `~/.watchit/config.yml`
-- `~/.imdb/data/list.json`, `details.json`, all `tt*.jpg` posters → copied to `~/.watchit/data/`
+Then either:
 
-So if you were already using IMDB-terminal, your Top 250, details, wish/dump lists, genre filters, TMDb key, and all 600+ cached posters arrive pre-populated.
+1. Launch watchit and press **K** to enter the key (or `R` to set
+   the streaming region, ISO code like `US`, `NO`, `GB`).
+2. Or edit `~/.watchit/config.yml` directly:
+   ```yaml
+   tmdb_key: "your-v3-api-key-here"
+   region: "US"
+   ```
 
-If you're new, press **I** on first launch to scrape the IMDb Top 250 (takes about a minute in the background).
+Press **I** to fetch the top-rated movies and TV from TMDB. Press
+**L** to additionally pull the popular-now lists.
+
+### Migrating from IMDB-terminal
+
+If you used the Ruby [IMDB-terminal](https://github.com/isene/IMDB)
+gem, watchit auto-imports its config and cached posters:
+
+- `~/.imdb.yml` → `~/.watchit/config.yml`
+- `~/.imdb/data/list.json`, `details.json`, `tt*.jpg` posters → `~/.watchit/data/`
+
+Note: the imported list/details use IMDB tconst IDs (`tt1234567`),
+which watchit no longer queries against (IMDB now blocks plain
+HTTP). Re-press **I** to refetch with TMDB IDs; the wish/dump
+lists' tconst entries will be stale until re-added via search (`/`).
 
 ## Features
 
-- **IMDb Top 250** for movies and series via embedded JSON-LD
-- **Load additional lists** — popular movies/TV and trending (press `L`)
-- **Per-title details**: plot, cast, directors, runtime, genres, release date, seasons/episodes for series
-- **TMDb streaming info** — shows where each title is available in your region
+- **Top-rated and popular** lists for movies and series, pulled from TMDB
+- **Load additional lists** — popular movies and TV (press `L`)
+- **Per-title details**: plot, cast, directors, runtime, genres, release date, seasons/episodes for series, content rating
+- **Streaming info** — shows where each title is available in your region (TMDB watch/providers)
 - **Five panes**: list, genre filter, wish, dump, detail with poster
 - **Focus-based borders** — the active pane highlights itself
 - **Poster display** inline in the detail pane (kitty/sixel/w3m via glow)
-- **Clickable IMDb links** (OSC 8) in every detail view
 - **Genre filtering**: include (`+`), exclude (`-`), or clear (`Space`) on the highlighted genre
 - **Rating / year filters**, sort by rating or alphabetical
 - **Wish and dump lists** separate for movies and series
-- **IMDb autocomplete search** (`/`) to add titles beyond the Top 250
-- **Background threads** for scrape + fetch — UI never blocks
+- **Multi-search** (`/`) across TMDB movies and TV
+- **Background threads** for fetch — UI never blocks
 - **Verify (`v`)** — fetch missing details; **Refetch (`f`)** — re-pull current item
 - **Duplicate removal (`D`)** across all lists
 

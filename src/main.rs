@@ -2,7 +2,6 @@ mod config;
 mod data;
 mod import;
 mod scrape;
-mod tmdb;
 
 use config::Config;
 use crust::{Crust, Input, Pane};
@@ -33,7 +32,11 @@ fn main() {
     if let Some(msg) = import_msg {
         app.footer_say(&format!(" {}", msg), 46);
     } else if app.db.movies.is_empty() && app.db.series.is_empty() {
-        app.footer_say(" No data: press I to scrape Top 250 (takes 1-2 min)", 226);
+        if app.cfg.tmdb_key.is_empty() {
+            app.footer_say(" No data + no TMDB key: press K to set the key (free at themoviedb.org/settings/api), then I to fetch", 196);
+        } else {
+            app.footer_say(" No data: press I to fetch top-rated lists from TMDB (takes ~10s)", 226);
+        }
     }
 
     app.render_all();
@@ -74,7 +77,7 @@ fn main() {
             "I" => { app.start_full_scrape(); app.render_all(); }
             "i" => { app.start_incremental(); app.render_all(); }
             "f" => { app.refetch_current(); app.render_all(); }
-            "k" => { app.set_tmdb_key(); app.render_all(); }
+            "K" => { app.set_tmdb_key(); app.render_all(); }
             "R" => { app.set_region(); app.render_all(); }
             "D" => { app.remove_duplicates(); app.render_all(); }
             "v" => { app.verify_data(); app.render_all(); }
@@ -817,10 +820,7 @@ impl App {
         let region = self.cfg.region.clone();
         std::thread::spawn(move || {
             for id in missing {
-                let mut d = scrape::fetch_details(&id);
-                if !d.error && !key.is_empty() {
-                    d.streaming = tmdb::streaming_providers(&id, &region, &key);
-                }
+                let d = scrape::fetch_details_keyed(&id, None, &region, &key);
                 let _ = tx.send(d);
             }
         });
@@ -843,13 +843,16 @@ impl App {
             self.db.series.iter().map(|i| i.id.clone()).collect();
         let mut new_movies = self.db.movies.clone();
         let mut new_series = self.db.series.clone();
+        let key = self.cfg.tmdb_key.clone();
+        let movie_limit = self.cfg.movie_limit;
+        let series_limit = self.cfg.series_limit;
         std::thread::spawn(move || {
             let _ = tx.send(ScrapeResult::Progress("Popular movies...".into()));
-            for it in scrape::scrape_chart("chart/moviemeter") {
+            for it in scrape::scrape_chart_keyed("chart/moviemeter", movie_limit, &key) {
                 if !existing_movies.contains(&it.id) { new_movies.push(it); }
             }
             let _ = tx.send(ScrapeResult::Progress("Popular series...".into()));
-            for it in scrape::scrape_chart("chart/tvmeter") {
+            for it in scrape::scrape_chart_keyed("chart/tvmeter", series_limit, &key) {
                 if !existing_series.contains(&it.id) { new_series.push(it); }
             }
             let _ = tx.send(ScrapeResult::Full(new_movies, new_series));
@@ -874,18 +877,22 @@ impl App {
             self.footer_say(" Scrape already running", 226);
             return;
         }
-        self.footer_say(" Scraping IMDb Top 250...", 226);
+        if self.cfg.tmdb_key.is_empty() {
+            self.footer_say(" No TMDB API key — set tmdb_key in ~/.watchit/config.yml (free key at themoviedb.org/settings/api)", 196);
+            return;
+        }
+        self.footer_say(" Fetching TMDB top-rated lists...", 226);
         self.render_footer();
         let (tx, rx) = mpsc::channel();
         let movie_limit = self.cfg.movie_limit;
         let series_limit = self.cfg.series_limit;
+        let key = self.cfg.tmdb_key.clone();
         std::thread::spawn(move || {
+            let key1 = key.clone();
             let _ = tx.send(ScrapeResult::Progress("Fetching movies...".into()));
-            let mut movies = scrape::scrape_chart("chart/top");
-            movies.truncate(movie_limit);
+            let movies = scrape::scrape_chart_keyed("chart/top", movie_limit, &key1);
             let _ = tx.send(ScrapeResult::Progress("Fetching series...".into()));
-            let mut series = scrape::scrape_chart("chart/toptv");
-            series.truncate(series_limit);
+            let series = scrape::scrape_chart_keyed("chart/toptv", series_limit, &key);
             let _ = tx.send(ScrapeResult::Full(movies, series));
         });
         self.scrape_rx = Some(rx);
@@ -913,10 +920,7 @@ impl App {
         let region = self.cfg.region.clone();
         std::thread::spawn(move || {
             for id in missing {
-                let mut d = scrape::fetch_details(&id);
-                if !d.error && !key.is_empty() {
-                    d.streaming = tmdb::streaming_providers(&id, &region, &key);
-                }
+                let d = scrape::fetch_details_keyed(&id, None, &region, &key);
                 let _ = tx.send(d);
             }
         });
@@ -932,10 +936,7 @@ impl App {
         let key = self.cfg.tmdb_key.clone();
         let region = self.cfg.region.clone();
         std::thread::spawn(move || {
-            let mut d = scrape::fetch_details(&id_clone);
-            if !d.error && !key.is_empty() {
-                d.streaming = tmdb::streaming_providers(&id_clone, &region, &key);
-            }
+            let d = scrape::fetch_details_keyed(&id_clone, None, &region, &key);
             let _ = tx.send(d);
         });
         self.detail_rx = Some(rx);
@@ -1024,7 +1025,7 @@ impl App {
             "ESC" => { self.search_mode = false; }
             "ENTER" => {
                 if self.search_results.is_empty() {
-                    self.search_results = scrape::search(&self.search_buf, 10);
+                    self.search_results = scrape::search_keyed(&self.search_buf, 10, &self.cfg.tmdb_key);
                 } else if let Some(hit) = self.search_results.get(self.search_idx).cloned() {
                     // Add to current view's list if not present.
                     let src = if self.cfg.view == "movies" { &mut self.db.movies } else { &mut self.db.series };
@@ -1071,7 +1072,7 @@ impl App {
 
     fn show_help(&mut self) {
         let help = "\n \
-            watchit — IMDb Top 250 browser\n\n \
+            watchit — TMDB top-rated browser\n\n \
             KEYS\n \
               TAB / S-TAB    Switch focus between panes\n \
               j/k  UP/DOWN   Move within the focused pane\n \
@@ -1083,14 +1084,14 @@ impl App {
               o              Toggle sort (rating / alphabetical)\n \
               r              Set minimum rating\n \
               y / Y          Set min / max year\n \
-              /              Search IMDb for new titles\n \
-              I              Full scrape of Top 250 (background)\n \
+              /              Search TMDB for new titles\n \
+              I              Full fetch of top-rated lists (background)\n \
               i              Incremental fetch of missing details\n \
               f              Re-fetch current item\n \
               v              Verify data (fetch first 20 missing)\n \
-              L              Load additional IMDb lists (popular + trending)\n \
+              L              Load additional lists (popular movies + TV)\n \
               D              Remove duplicate entries\n \
-              k              Set TMDb API key\n \
+              K              Set TMDB API key (required — see README)\n \
               R              Set streaming region\n \
               W              Save config now\n \
               ? / q          Help / Quit\n";
