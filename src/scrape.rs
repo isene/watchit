@@ -219,6 +219,13 @@ fn parse_details(id: &str, kind: &str, region: &str, v: &JsonValue) -> Details {
                 .join(","))
             .unwrap_or_default());
 
+    // IMDB tconst (when TMDB knows it) — used for click-through link.
+    let imdb_id = v.pointer("/external_ids/imdb_id")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_default();
+
     // Streaming providers from append_to_response=watch/providers.
     // TMDB groups by region; we pull only the configured one.
     let streaming = if region.is_empty() {
@@ -256,6 +263,7 @@ fn parse_details(id: &str, kind: &str, region: &str, v: &JsonValue) -> Details {
         country,
         kind: if is_movie { "Movie".into() } else { "TVSeries".into() },
         release_date,
+        imdb_id,
         start_date, end_date,
         seasons, episodes,
         popularity,

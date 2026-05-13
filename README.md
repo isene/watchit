@@ -100,14 +100,14 @@ lists' tconst entries will be stale until re-added via search (`/`).
 | `o` | Toggle sort (rating / alphabetical) |
 | `r` | Set minimum rating |
 | `y` / `Y` | Set min / max year |
-| `/` | Search IMDb for new titles |
-| `I` | Full scrape of Top 250 (background) |
+| `/` | Search TMDB for new titles |
+| `I` | Fetch top-rated movies + TV (background) |
 | `i` | Incremental fetch of missing details |
 | `f` | Re-fetch current item |
 | `v` | Verify data integrity |
-| `L` | Load popular + trending lists (background, no duplicates) |
+| `L` | Load popular movies + TV (background, no duplicates) |
 | `D` | Remove duplicate entries |
-| `k` | Set TMDb v3 API key |
+| `K` | Set TMDB v3 API key |
 | `R` | Set streaming region (ISO code) |
 | `W` | Save config now |
 | `?` / `q` | Help / Quit |
@@ -135,33 +135,46 @@ genres_include: []
 genres_exclude: []
 ```
 
-### TMDb streaming info (optional)
+### TMDB region for streaming providers
 
-1. Sign up at [themoviedb.org](https://www.themoviedb.org)
-2. Settings → API → Create → Developer; copy your v3 API key
-3. Press `k` in watchit and paste the key
-4. Press `R` to set your region (e.g. `US`, `GB`, `NO`)
-5. Press `i` to refetch details; streaming providers appear in the detail pane
+A TMDB API key is required (see "First Run" above). After the key is
+set, pick the region for streaming-availability lookups:
+
+1. Press `R` and enter an ISO country code (e.g. `US`, `GB`, `NO`)
+2. Press `i` to refetch details; streaming providers appear in the
+   detail pane for titles available in that region
 
 ## File Layout
 
 ```
 ~/.watchit/
-├── config.yml           # Your preferences
+├── config.yml           # Your preferences (incl. tmdb_key, region)
 └── data/
     ├── list.json        # Movie + series metadata (title, rating, year, genres)
     ├── details.json     # Per-title details cache
-    └── tt*.jpg          # Poster images
+    └── *.jpg            # Poster images (TMDB IDs)
 ```
 
-## Condition / Data Sources
+## Data Sources
 
-- **Movies/series list**: IMDb Top 250 charts (`chart/top`, `chart/toptv`)
-- **Additional lists**: IMDb popular charts (`moviemeter`, `tvmeter`) + trending
-- **Per-title details**: IMDb title pages, parsed via embedded JSON-LD
-- **Streaming availability**: [TMDb](https://www.themoviedb.org/) watch providers API
+All data comes from a single backbone:
 
-All scraping uses embedded structured data where possible (stable, parseable, no regex fragility).
+- **Lists**: TMDB top-rated and popular endpoints
+  (`/movie/top_rated`, `/tv/top_rated`, `/movie/popular`, `/tv/popular`)
+- **Per-title details**: TMDB `/{movie|tv}/{id}` with
+  `append_to_response=credits,external_ids,watch/providers,release_dates`
+  — one request returns plot, cast, crew, streaming providers,
+  region-specific content rating, and IMDB cross-reference id
+- **Search**: TMDB `/search/multi` (movies + TV in one query)
+
+The detail pane shows two click-through links per title: TMDB (the
+data source) and IMDB (when TMDB has the external id on file — most
+films from the last \~50 years).
+
+Why TMDB and not IMDB scraping: IMDB now sits behind a CloudFront WAF
+that serves a JavaScript challenge to plain HTTP, so the old JSON-LD
+scrape returns nothing. TMDB has a free, well-documented REST API and
+the same metadata for the same titles.
 
 ## Part of the Rust Terminal Suite (Fe2O3)
 
@@ -173,7 +186,7 @@ See the [Fe₂O₃ suite overview](https://github.com/isene/fe2o3) and the [land
 - [scroll](https://github.com/isene/scroll) — web browser
 - [tock](https://github.com/isene/tock) — calendar
 - [nova](https://github.com/isene/nova) — astronomy panel
-- **watchit** — IMDb browser
+- **watchit** — TMDB browser
 
 All Fe2O3 tools share [crust](https://github.com/isene/crust) for the TUI and are installed as single static binaries. Fast startup, no runtime dependencies.
 

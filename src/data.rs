@@ -50,6 +50,11 @@ pub struct Details {
     pub kind: String,
     #[serde(default)]
     pub release_date: String,
+    /// IMDB tconst (`tt1234567`) if TMDB has it on file. Used to render
+    /// a click-through link from the detail pane — TMDB is the data
+    /// source, IMDB is one click away for reviews / trivia / etc.
+    #[serde(default)]
+    pub imdb_id: String,
     #[serde(default)]
     pub start_date: String,
     #[serde(default)]
@@ -137,12 +142,14 @@ fn parse_legacy_details(s: &str) -> Option<DetailsCache> {
         let err_str = e.get("error").and_then(|x| x.as_str()).unwrap_or("none");
         let error = err_str != "none" && !err_str.is_empty();
 
+        // Legacy ids ARE tconsts, so use the id itself as imdb_id.
+        let imdb_id = if id.starts_with("tt") { id.clone() } else { String::new() };
         out.insert(id.clone(), Details {
             id: id.clone(),
             title, year, rating, votes, runtime, plot, genres,
             directors, writers: Vec::new(), stars,
             poster_url: String::new(), streaming,
-            content_rating, country, kind, release_date, start_date, end_date,
+            content_rating, country, kind, release_date, imdb_id, start_date, end_date,
             seasons, episodes, popularity, error,
         });
     }

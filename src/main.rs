@@ -431,11 +431,26 @@ impl App {
             .or_else(|| item.as_ref().map(|it| it.title.clone()))
             .unwrap_or_else(|| id.clone());
         lines.push(style::bold(&style::fg(&title, 226)));
-        let url = format!("https://www.imdb.com/title/{}/", id);
-        let visible = format!("imdb.com/title/{}/", id);
-        // OSC 8 hyperlink: clickable in kitty/foot/wezterm/iTerm2
-        let link = format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, visible);
-        lines.push(style::fg(&style::underline(&link), 240));
+        // OSC 8 hyperlinks: TMDB is the data source so always present;
+        // IMDB is shown alongside when TMDB has the external id on file
+        // (Details.imdb_id from external_ids.imdb_id in fetch_details).
+        // Clickable in kitty/foot/wezterm/iTerm2.
+        let kind = det.as_ref().map(|d| d.kind.as_str()).unwrap_or("");
+        let tmdb_path = if kind == "TVSeries" { "tv" } else { "movie" };
+        let tmdb_url = format!("https://www.themoviedb.org/{}/{}", tmdb_path, id);
+        let tmdb_link = format!(
+            "\x1b]8;;{}\x1b\\themoviedb.org/{}/{}\x1b]8;;\x1b\\",
+            tmdb_url, tmdb_path, id);
+        let mut link_line = style::fg(&style::underline(&tmdb_link), 240);
+        if let Some(tconst) = det.as_ref().map(|d| d.imdb_id.clone()).filter(|s| !s.is_empty()) {
+            let imdb_url = format!("https://www.imdb.com/title/{}/", tconst);
+            let imdb_link = format!(
+                "\x1b]8;;{}\x1b\\imdb.com/title/{}/\x1b]8;;\x1b\\",
+                imdb_url, tconst);
+            link_line.push_str(&style::fg("  ·  ", 240));
+            link_line.push_str(&style::fg(&style::underline(&imdb_link), 240));
+        }
+        lines.push(link_line);
         lines.push(String::new());
 
         if let Some(d) = det.as_ref() {
@@ -827,7 +842,7 @@ impl App {
         self.detail_rx = Some(rx);
     }
 
-    /// Load additional IMDb chart pages ("popular" movies + TV, "trending")
+    /// Load additional TMDB lists ("popular" movies + TV)
     /// and merge any new titles into the database without duplicates.
     fn load_additional_lists(&mut self) {
         if self.scrape_rx.is_some() {
