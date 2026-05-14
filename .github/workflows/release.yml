@@ -29,18 +29,18 @@ jobs:
             artifact: watchit-macos-aarch64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: watchit
 
       - name: Checkout crust
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: isene/crust
           path: crust
 
       - name: Checkout glow
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: isene/glow
           path: glow
@@ -78,7 +78,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
