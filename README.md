@@ -2,7 +2,7 @@
 
 <img src="img/watchit.svg" align="left" width="150" height="150">
 
-![Rust](https://img.shields.io/badge/language-Rust-f74c00) ![License](https://img.shields.io/badge/license-Unlicense-green) ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue) [![GitHub release](https://img.shields.io/github/v/release/isene/watchit)](https://github.com/isene/watchit/releases) [![GitHub stars](https://img.shields.io/github/stars/isene/watchit.svg)](https://github.com/isene/watchit/stargazers) ![Stay Amazing](https://img.shields.io/badge/Stay-Amazing-important)
+![Rust](https://img.shields.io/badge/language-Rust-f74c00) ![License](https://img.shields.io/badge/license-Unlicense-green) ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue) [![GitHub release](https://badgen.net/github/release/isene/watchit)](https://github.com/isene/watchit/releases) [![GitHub stars](https://img.shields.io/github/stars/isene/watchit.svg)](https://github.com/isene/watchit/stargazers) ![Stay Amazing](https://img.shields.io/badge/Stay-Amazing-important)
 
 A fast terminal browser for discovering and managing movies and TV series. Pulls top-rated and popular lists from TMDB, keeps your own wish and dump lists, renders posters inline. Rust feature port of [IMDB-terminal](https://github.com/isene/IMDB), built on [crust](https://github.com/isene/crust) and [glow](https://github.com/isene/glow).
 
