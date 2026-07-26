@@ -438,15 +438,17 @@ impl App {
         let kind = det.as_ref().map(|d| d.kind.as_str()).unwrap_or("");
         let tmdb_path = if kind == "TVSeries" { "tv" } else { "movie" };
         let tmdb_url = format!("https://www.themoviedb.org/{}/{}", tmdb_path, id);
-        let tmdb_link = format!(
-            "\x1b]8;;{}\x1b\\themoviedb.org/{}/{}\x1b]8;;\x1b\\",
-            tmdb_url, tmdb_path, id);
+        let tmdb_link = style::hyperlink(
+            &tmdb_url,
+            &format!("themoviedb.org/{}/{}", tmdb_path, id),
+        );
         let mut link_line = style::fg(&style::underline(&tmdb_link), 240);
         if let Some(tconst) = det.as_ref().map(|d| d.imdb_id.clone()).filter(|s| !s.is_empty()) {
             let imdb_url = format!("https://www.imdb.com/title/{}/", tconst);
-            let imdb_link = format!(
-                "\x1b]8;;{}\x1b\\imdb.com/title/{}/\x1b]8;;\x1b\\",
-                imdb_url, tconst);
+            let imdb_link = style::hyperlink(
+                &imdb_url,
+                &format!("imdb.com/title/{}/", tconst),
+            );
             link_line.push_str(&style::fg("  ·  ", 240));
             link_line.push_str(&style::fg(&style::underline(&imdb_link), 240));
         }
