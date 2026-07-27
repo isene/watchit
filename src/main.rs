@@ -11,6 +11,24 @@ use std::collections::HashSet;
 use std::sync::mpsc;
 
 fn main() {
+    // --help and --version answer before the TUI touches the terminal.
+    // A tool that asks what this is — the fe2o3 launcher's ? popup, a
+    // packaging script, a curious shell — should get an answer, not a
+    // screen paint.
+    if std::env::args().skip(1).any(|a| a == "-h" || a == "--help") {
+        println!("watchit — Movie and series browser (Fe2O3 suite)");
+        println!();
+        println!("Usage: watchit");
+        println!();
+        println!("IMDb Top 250 with inline posters, TMDb streaming info, wish and dump");
+        println!("lists, genre filters, search-to-add. Data in ~/.watchit/.");
+        return;
+    }
+    if std::env::args().skip(1).any(|a| a == "-v" || a == "--version") {
+        println!("watchit {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     config::ensure_dirs();
 
     // First run: import existing Ruby IMDB data if present.

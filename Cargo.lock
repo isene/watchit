@@ -153,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "fe2o3-crust"
-version = "0.1.42"
+version = "0.1.46"
 dependencies = [
  "crossterm",
  "libc",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "fe2o3-glow"
-version = "0.1.19"
+version = "0.1.21"
 dependencies = [
  "base64",
  "image",
@@ -890,7 +890,7 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "watchit"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "fe2o3-crust",
  "fe2o3-glow",
