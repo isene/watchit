@@ -174,6 +174,11 @@ nothing for Syncthing to conflict over; per title, the newest rating wins.
 Clearing a rating is itself a timestamped event, so a clear on one device
 sticks on the other.
 
+Each rating carries its title and year as well as its id, because the two ends
+do not share an id space — a catalog imported from IMDB-terminal still holds
+`tt…` ids while the phone keys everything by TMDB id. The title bridges them,
+so the same film is one rating on both devices either way.
+
 ## Data Sources
 
 All data comes from a single backbone:

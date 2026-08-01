@@ -17,12 +17,27 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Entry {
     /// 1-10, or 0 for "no rating" (tombstone).
     pub score: u8,
     /// Unix seconds. Newest wins when devices disagree.
     pub ts: i64,
+    /// The title as this device knew it. Carried because the two ends do
+    /// NOT share an id space: this catalog still holds IMDB tconsts from
+    /// the old import while the phone keys everything by TMDB id. Title +
+    /// year is the only key both ends can agree on, so it rides along and
+    /// backs the id up.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub year: i32,
+}
+
+/// Key for the title fallback: case and punctuation are not signal.
+fn title_key(title: &str, year: i32) -> (String, i32) {
+    let t: String = title.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+    (t, year)
 }
 
 pub type Map = HashMap<String, Entry>;
@@ -30,6 +45,9 @@ pub type Map = HashMap<String, Entry>;
 #[derive(Default)]
 pub struct Ratings {
     map: Map,
+    /// Title+year → id, so a rating made under the other end's id scheme
+    /// still finds its title here. Rebuilt whenever `map` changes.
+    by_title: HashMap<(String, i32), String>,
     mine: PathBuf,
 }
 
@@ -82,27 +100,54 @@ impl Ratings {
                 if is_ratings { merge_into(&mut map, read_file(&p)); }
             }
         }
-        Self { map, mine }
+        let mut r = Self { map, by_title: HashMap::new(), mine };
+        r.reindex();
+        r
     }
 
-    /// My score for a title, or None when unrated.
-    pub fn get(&self, id: &str) -> Option<u8> {
-        self.map.get(id).map(|e| e.score).filter(|s| *s > 0)
+    fn reindex(&mut self) {
+        self.by_title.clear();
+        for (id, e) in &self.map {
+            if e.title.is_empty() { continue; }
+            self.by_title.insert(title_key(&e.title, e.year), id.clone());
+        }
+    }
+
+    /// My score for a title, or None when unrated. Falls back to the
+    /// title so a rating made on the phone (TMDB ids) still lands on the
+    /// same film here (tconsts).
+    pub fn get(&self, id: &str, title: &str, year: i32) -> Option<u8> {
+        if let Some(e) = self.map.get(id) {
+            return Some(e.score).filter(|s| *s > 0);
+        }
+        let other = self.by_title.get(&title_key(title, year))?;
+        self.map.get(other).map(|e| e.score).filter(|s| *s > 0)
     }
 
     /// Set (1-10) or clear (0) my score, and write this device's file.
-    pub fn set(&mut self, id: &str, score: u8) {
-        self.map.insert(id.to_string(), Entry { score: score.min(10), ts: now() });
+    /// Writing through the id the OTHER end used (when the title matches)
+    /// keeps one film to one entry instead of two rival ones.
+    pub fn set(&mut self, id: &str, title: &str, year: i32, score: u8) {
+        let key = match self.map.contains_key(id) {
+            true => id.to_string(),
+            false => self.by_title.get(&title_key(title, year)).cloned()
+                .unwrap_or_else(|| id.to_string()),
+        };
+        self.map.insert(key, Entry {
+            score: score.min(10), ts: now(),
+            title: title.to_string(), year,
+        });
+        self.reindex();
         self.save();
     }
 
     /// Every title I have actually scored, highest first.
-    pub fn rated(&self) -> Vec<(String, u8)> {
-        let mut v: Vec<(String, u8)> = self.map.iter()
+    pub fn rated(&self) -> Vec<(String, Entry)> {
+        let mut v: Vec<(String, Entry)> = self.map.iter()
             .filter(|(_, e)| e.score > 0)
-            .map(|(id, e)| (id.clone(), e.score))
+            .map(|(id, e)| (id.clone(), e.clone()))
             .collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by(|a, b| b.1.score.cmp(&a.1.score));
         v
     }
 
@@ -125,14 +170,18 @@ impl Ratings {
 mod tests {
     use super::*;
 
+    fn e(score: u8, ts: i64, title: &str, year: i32) -> Entry {
+        Entry { score, ts, title: title.into(), year }
+    }
+
     #[test]
     fn newest_timestamp_wins() {
         let mut dst: Map = HashMap::new();
-        dst.insert("tt1".into(), Entry { score: 5, ts: 100 });
-        dst.insert("tt2".into(), Entry { score: 7, ts: 300 });
+        dst.insert("tt1".into(), e(5, 100, "A", 1990));
+        dst.insert("tt2".into(), e(7, 300, "B", 1991));
         let mut src: Map = HashMap::new();
-        src.insert("tt1".into(), Entry { score: 9, ts: 200 }); // newer, wins
-        src.insert("tt2".into(), Entry { score: 3, ts: 200 }); // older, loses
+        src.insert("tt1".into(), e(9, 200, "A", 1990)); // newer, wins
+        src.insert("tt2".into(), e(3, 200, "B", 1991)); // older, loses
         merge_into(&mut dst, src);
         assert_eq!(dst["tt1"].score, 9);
         assert_eq!(dst["tt2"].score, 7);
@@ -143,10 +192,31 @@ mod tests {
         // The phone clears what the desktop rated yesterday: the
         // tombstone has to win, or the rating comes back on merge.
         let mut dst: Map = HashMap::new();
-        dst.insert("tt1".into(), Entry { score: 8, ts: 100 });
+        dst.insert("tt1".into(), e(8, 100, "A", 1990));
         let mut src: Map = HashMap::new();
-        src.insert("tt1".into(), Entry { score: 0, ts: 200 });
+        src.insert("tt1".into(), e(0, 200, "A", 1990));
         merge_into(&mut dst, src);
         assert_eq!(dst["tt1"].score, 0);
+    }
+
+    #[test]
+    fn the_title_bridges_two_id_schemes() {
+        // The phone rates by TMDB id, this catalog still holds tconsts.
+        // Same film, so the score has to show up here anyway — and
+        // re-rating it must land on the SAME entry, not fork a second.
+        let dir = std::env::temp_dir().join(format!("watchit-ratings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut phone: Map = HashMap::new();
+        phone.insert("278".into(), e(9, 100, "The Shawshank Redemption", 1994));
+        std::fs::write(dir.join("ratings-phone.json"),
+                       serde_json::to_string(&phone).unwrap()).unwrap();
+
+        let mut r = Ratings::load(&dir);
+        assert_eq!(r.get("tt0111161", "The Shawshank Redemption", 1994), Some(9));
+        r.set("tt0111161", "The Shawshank Redemption", 1994, 7);
+        assert_eq!(r.rated().len(), 1, "one film, one entry");
+        assert_eq!(r.get("tt0111161", "The Shawshank Redemption", 1994), Some(7));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

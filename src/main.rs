@@ -305,7 +305,8 @@ impl App {
             "alpha" => ids.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase())),
             // My own score first, unrated last, TMDB rating breaking ties.
             "mine" => ids.sort_by(|a, b| {
-                let (ma, mb) = (self.ratings.get(&a.0).unwrap_or(0), self.ratings.get(&b.0).unwrap_or(0));
+                let (ma, mb) = (self.ratings.get(&a.0, &a.2, 0).unwrap_or(0),
+                                self.ratings.get(&b.0, &b.2, 0).unwrap_or(0));
                 mb.cmp(&ma).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
             }),
             _ => ids.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)),
@@ -403,7 +404,7 @@ impl App {
             let marker = if focused { "\u{2192} " } else { "  " };
             // My score next to the crowd's, padded to a fixed 3 columns
             // BEFORE colouring — SGR bytes would break the alignment.
-            let mine = match self.ratings.get(id) {
+            let mine = match self.ratings.get(id, &title, year) {
                 Some(s) => style::fg(&format!("{:>3}", format!("\u{2605}{}", s)), 214),
                 None => "   ".to_string(),
             };
@@ -508,7 +509,8 @@ impl App {
 
         // My own score sits above TMDB's, and says so when it is missing
         // — an empty line here would read as "rated 0".
-        let mine = match self.ratings.get(&id) {
+        let seen_year = self.seen_of(&id, None).map(|s| s.year).unwrap_or(0);
+        let mine = match self.ratings.get(&id, &title, seen_year) {
             Some(s) => style::bold(&style::fg(&format!("My rating: {}/10", s), 214)),
             None => style::fg("My rating: – (press 1-9, 0 for 10)", 240),
         };
@@ -1198,8 +1200,10 @@ impl App {
     /// the list, the wish pane and the dump pane alike.
     fn rate(&mut self, score: u8) {
         let Some(id) = self.current_id() else { return };
-        let title = self.seen_of(&id, None).map(|s| s.title).unwrap_or_else(|| id.clone());
-        self.ratings.set(&id, score);
+        let seen = self.seen_of(&id, None);
+        let title = seen.as_ref().map(|s| s.title.clone()).unwrap_or_else(|| id.clone());
+        let year = seen.as_ref().map(|s| s.year).unwrap_or(0);
+        self.ratings.set(&id, &title, year, score);
         if score == 0 {
             self.footer_say(&format!(" Cleared my rating for {}", title), 244);
         } else {
@@ -1213,11 +1217,20 @@ impl App {
     /// Everything Claude needs to know about my taste: what I scored,
     /// what I already want, what I threw out.
     fn taste(&self) -> String {
-        let rated: Vec<claude::Seen> = self.ratings.rated().iter()
-            .filter_map(|(id, s)| self.seen_of(id, Some(*s)))
+        // Fall back to the title stored in the rating itself: a rating
+        // that came from the phone carries an id this catalog never had.
+        let rated: Vec<claude::Seen> = self.ratings.rated().into_iter()
+            .map(|(id, e)| self.seen_of(&id, Some(e.score)).unwrap_or(claude::Seen {
+                title: e.title.clone(), year: e.year,
+                kind: "Movie or series".into(), score: Some(e.score),
+            }))
             .collect();
         let ids = |v: &Vec<String>| -> Vec<claude::Seen> {
-            v.iter().filter_map(|id| self.seen_of(id, self.ratings.get(id))).collect()
+            v.iter().filter_map(|id| {
+                let seen = self.seen_of(id, None)?;
+                let score = self.ratings.get(id, &seen.title, seen.year);
+                Some(claude::Seen { score, ..seen })
+            }).collect()
         };
         let mut wish = ids(&self.cfg.wish_movies);
         wish.extend(ids(&self.cfg.wish_series));
