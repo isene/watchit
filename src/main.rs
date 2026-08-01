@@ -157,6 +157,10 @@ struct App {
     /// Show only what I have rated, highest first. A session toggle —
     /// it is a way of looking at the list, not a saved preference.
     only_rated: bool,
+    /// First visible row of the list pane. Kept between renders (rather
+    /// than recomputed from the cursor) so the view scrolls the way
+    /// pointer's does instead of jumping to re-centre.
+    list_scroll: usize,
 
     // Async: background scrape/fetch tasks.
     scrape_rx: Option<mpsc::Receiver<ScrapeResult>>,
@@ -202,6 +206,7 @@ impl App {
             all_genres: Vec::new(),
             filtered: Vec::new(),
             only_rated: false,
+            list_scroll: 0,
             scrape_rx: None,
             detail_rx: None,
             status_msg: None,
@@ -267,9 +272,31 @@ impl App {
     fn load_all(&mut self) {
         self.db = Database::load(&config::list_path());
         self.details = data::load_details_cache(&config::details_path());
+        self.drop_mismatched_details();
         self.ratings = ratings::Ratings::load(&config::sync_dir());
         self.rebuild_genres();
         self.rebuild_filtered();
+    }
+
+    /// Throw away any cached details that describe the wrong thing.
+    ///
+    /// TMDB movie and tv ids are separate spaces, so a details fetch that
+    /// probed movie-then-tv could answer for a completely different film
+    /// (tv/67683 is Travelers; movie/67683 is a 1969 Soviet comedy). Such
+    /// an entry looks perfectly valid — it has a title and no error flag
+    /// — so nothing would ever refetch it. Catch it by the one thing that
+    /// gives it away: it disagrees with the catalog about what kind of
+    /// thing it is.
+    fn drop_mismatched_details(&mut self) {
+        let mut bad: Vec<String> = Vec::new();
+        for (id, d) in &self.details {
+            let Some(want) = self.kind_of(id) else { continue };
+            let has = if d.kind == "TVSeries" { "tv" } else if d.kind == "Movie" { "movie" } else { continue };
+            if has != want { bad.push(id.clone()); }
+        }
+        if bad.is_empty() { return; }
+        for id in &bad { self.details.remove(id); }
+        data::save_details_cache(&config::details_path(), &self.details);
     }
 
     fn rebuild_genres(&mut self) {
@@ -414,7 +441,7 @@ impl App {
             lines.push(format!("{}{:>4.1} {} {}", marker, rating, mine, title_styled));
         }
         self.list.set_text(&lines.join("\n"));
-        self.list.ix = self.compute_scroll(self.list_idx, self.filtered.len(), self.list.h as usize);
+        self.scroll_list();
         self.list.full_refresh();
         if self.list.border { self.list.border_refresh(); }
     }
@@ -583,8 +610,11 @@ impl App {
         let top = 15u16;
         let img_x = self.detail.x;
         let img_y = self.detail.y + top;
-        let img_w = self.detail.w.saturating_sub(2);
-        let img_h = self.detail.h.saturating_sub(top + 1);
+        // Cap it. Unbounded, the box was the whole detail pane, and on a
+        // tall terminal that is a poster the size of the screen with the
+        // plot squeezed above it. A poster reads fine at postcard size.
+        let img_w = self.detail.w.saturating_sub(2).min(34);
+        let img_h = self.detail.h.saturating_sub(top + 1).min(24);
         if img_h < 4 { return; }
         self.image_display = Some(display);
         if let Some(ref mut disp) = self.image_display {
@@ -697,6 +727,31 @@ impl App {
     fn footer_say(&mut self, msg: &str, color: u8) {
         self.status_msg = Some((msg.to_string(), color));
         self.render_footer();
+    }
+
+    /// Scrolloff of 3, the way pointer does it: the cursor never comes
+    /// closer than three rows to either edge, and the offset persists
+    /// between renders so the view slides instead of jumping.
+    ///
+    /// The `+ HEAD` matters. The pane's title and its blank line are text
+    /// rows like any other, so the cursor sits two rows lower than its
+    /// index — without accounting for that, the last two titles lived
+    /// below the fold and the pane simply refused to scroll to them.
+    fn scroll_list(&mut self) {
+        const HEAD: usize = 2;
+        const OFF: usize = 3;
+        let h = self.list.h as usize;
+        let total = self.filtered.len() + HEAD;
+        let cursor = self.list_idx + HEAD;
+        if total <= h {
+            self.list_scroll = 0;
+        } else if cursor < self.list_scroll + OFF {
+            self.list_scroll = cursor.saturating_sub(OFF);
+        } else if cursor + OFF >= self.list_scroll + h {
+            let max_ix = total.saturating_sub(h);
+            self.list_scroll = (cursor + OFF + 1).saturating_sub(h).min(max_ix);
+        }
+        self.list.ix = self.list_scroll;
     }
 
     fn compute_scroll(&self, idx: usize, total: usize, h: usize) -> usize {
@@ -891,7 +946,7 @@ impl App {
             let needs = self.details.get(&it.id)
                 .map(|d| d.error || d.title.is_empty())
                 .unwrap_or(true);
-            if needs { missing.push(it.id.clone()); }
+            if needs { missing.push((it.id.clone(), self.kind_of(&it.id))); }
             if missing.len() >= 20 { break; }
         }
         if missing.is_empty() {
@@ -904,8 +959,8 @@ impl App {
         let key = self.cfg.tmdb_key.clone();
         let region = self.cfg.region.clone();
         std::thread::spawn(move || {
-            for id in missing {
-                let d = scrape::fetch_details_keyed(&id, None, &region, &key);
+            for (id, kind) in missing {
+                let d = scrape::fetch_details_keyed(&id, kind.as_deref(), &region, &key);
                 let _ = tx.send(d);
             }
         });
@@ -989,10 +1044,10 @@ impl App {
             return;
         }
         // Find first title without details and fetch it in the background.
-        let missing: Vec<String> = self.filtered.iter()
+        let missing: Vec<(String, Option<String>)> = self.filtered.iter()
             .filter(|id| self.details.get(id.as_str()).map(|d| d.error || d.title.is_empty()).unwrap_or(true))
             .take(5)
-            .cloned()
+            .map(|id| (id.clone(), self.kind_of(id)))
             .collect();
         if missing.is_empty() {
             self.footer_say(" All details present", 46);
@@ -1004,8 +1059,8 @@ impl App {
         let key = self.cfg.tmdb_key.clone();
         let region = self.cfg.region.clone();
         std::thread::spawn(move || {
-            for id in missing {
-                let d = scrape::fetch_details_keyed(&id, None, &region, &key);
+            for (id, kind) in missing {
+                let d = scrape::fetch_details_keyed(&id, kind.as_deref(), &region, &key);
                 let _ = tx.send(d);
             }
         });
@@ -1018,10 +1073,11 @@ impl App {
         self.render_footer();
         let (tx, rx) = mpsc::channel();
         let id_clone = id.clone();
+        let kind = self.kind_of(&id);
         let key = self.cfg.tmdb_key.clone();
         let region = self.cfg.region.clone();
         std::thread::spawn(move || {
-            let d = scrape::fetch_details_keyed(&id_clone, None, &region, &key);
+            let d = scrape::fetch_details_keyed(&id_clone, kind.as_deref(), &region, &key);
             let _ = tx.send(d);
         });
         self.detail_rx = Some(rx);
@@ -1124,13 +1180,15 @@ impl App {
 
     // --- Search ---
 
-    /// Search TMDB and pick from the hits in a popup.
+    /// Search TMDB and pick from the hits.
     ///
     /// This used to draw the query and the results into the detail pane,
     /// which the poster is painted over and which `render_all` rewrites
     /// on the next keypress — so the typing was invisible and the hits
-    /// flickered away. A popup owns the screen while it is up, and
-    /// `modal` gives the selection for free.
+    /// flickered away. Now the query goes in the footer prompt and the
+    /// hits get their own picker, with the highlighted one's blurb below
+    /// the list: four films called "Travellers" are otherwise impossible
+    /// to tell apart.
     fn search_titles(&mut self) {
         if self.cfg.tmdb_key.is_empty() {
             self.footer_say(" Search needs a TMDB key — press K", 196);
@@ -1147,24 +1205,9 @@ impl App {
             return;
         }
 
-        let lines: Vec<String> = hits.iter().map(|h| {
-            let kind = if h.kind == "tv" { "Series" } else { "Movie " };
-            let year = if h.year > 0 { h.year.to_string() } else { "----".into() };
-            let known = self.any_lookup(&h.id).is_some();
-            let mark = if known { "\u{2713}" } else { " " };
-            format!("{} {}  {}  {:>4.1}  {}", mark, kind, year, h.rating, h.title)
-        }).collect();
+        let Some(pick) = self.pick_search_hit(&query, &hits) else { return };
+        let hit = hits[pick].item.clone();
 
-        self.clear_poster();
-        self.footer_say(" j/k to move · ENTER adds it to your list · ESC cancels", 81);
-        let w = self.cols.saturating_sub(8).min(90).max(40);
-        let h = (lines.len() as u16 + 2).min(self.rows.saturating_sub(6)).max(5);
-        let mut popup = Popup::centered(w, h, 255, 234);
-        let pick = popup.modal(&lines.join("\n"));
-        self.repaint_screen();
-
-        let Some(i) = pick else { return };
-        let Some(hit) = hits.get(i).cloned() else { return };
         // Route by what TMDB says it is, NOT by the view that happens to
         // be open — searching for a series from the movie list used to
         // file it under movies, where it never showed up again.
@@ -1195,6 +1238,80 @@ impl App {
             if is_series { "Series" } else { "Movies" }), 46);
     }
 
+    /// The picker itself: a list of hits with the highlighted one's blurb
+    /// underneath. Its own loop rather than `Popup::modal`, because modal
+    /// is one line per item and returns only the final choice — there is
+    /// nowhere to hang the "what IS this one" panel that makes the choice
+    /// possible.
+    fn pick_search_hit(&mut self, query: &str, hits: &[scrape::SearchHit]) -> Option<usize> {
+        self.clear_poster();
+        let w = self.cols.saturating_sub(8).min(96).max(46);
+        let x = (self.cols.saturating_sub(w)) / 2;
+        let info_h = 7u16;
+        let list_h = (hits.len() as u16 + 1).min(self.rows.saturating_sub(info_h + 8)).max(4);
+        let total_h = list_h + info_h + 3;
+        let y = (self.rows.saturating_sub(total_h)) / 2 + 1;
+
+        let mut list = Pane::new(x.max(1), y, w, list_h, 255, 234);
+        list.border = true;
+        list.border_fg = Some(81);
+        list.wrap = false;
+        let mut info = Pane::new(x.max(1), y + list_h + 2, w, info_h, 252, 233);
+        info.border = true;
+        info.border_fg = Some(240);
+        info.wrap = true;
+
+        let mut idx = 0usize;
+        let mut result = None;
+        loop {
+            let rows: Vec<String> = hits.iter().enumerate().map(|(i, h)| {
+                let it = &h.item;
+                let kind = if it.kind == "tv" { "Series" } else { "Movie " };
+                let year = if it.year > 0 { it.year.to_string() } else { "----".into() };
+                let have = if self.any_lookup(&it.id).is_some() { "\u{2713}" } else { " " };
+                let line = format!("{} {}  {}  {:>4.1}  {}", have, kind, year, it.rating, it.title);
+                if i == idx { style::bold(&style::fg(&line, 226)) } else { line }
+            }).collect();
+            list.set_text(&format!("{}\n{}",
+                style::bold(&style::fg(&format!("Search: {}   ({} hits)", query, hits.len()), 81)),
+                rows.join("\n")));
+            list.ix = self.compute_scroll(idx + 1, hits.len() + 1, list_h as usize);
+            list.full_refresh();
+
+            let h = &hits[idx];
+            let year = if h.item.year > 0 { h.item.year.to_string() } else { "year unknown".into() };
+            let kind = if h.item.kind == "tv" { "Series" } else { "Movie" };
+            let blurb = if h.overview.trim().is_empty() {
+                style::fg("(TMDB has no description for this one)", 245)
+            } else {
+                h.overview.clone()
+            };
+            info.set_text(&format!("{}\n{}",
+                style::bold(&style::fg(
+                    &format!("{} · {} · {} · TMDB {:.1}", h.item.title, year, kind, h.item.rating), 226)),
+                blurb));
+            info.ix = 0;
+            info.full_refresh();
+
+            let Some(key) = Input::getchr(None) else { continue };
+            match key.as_str() {
+                "ESC" | "q" => break,
+                "ENTER" => { result = Some(idx); break; }
+                "j" | "DOWN" | "TAB" => { idx = (idx + 1) % hits.len(); }
+                "k" | "UP" | "S-TAB" | "BACKTAB" => {
+                    idx = if idx == 0 { hits.len() - 1 } else { idx - 1 };
+                }
+                "PgDOWN" => { idx = (idx + list_h as usize).min(hits.len() - 1); }
+                "PgUP" => { idx = idx.saturating_sub(list_h as usize); }
+                "HOME" => { idx = 0; }
+                "END" => { idx = hits.len() - 1; }
+                _ => {}
+            }
+        }
+        self.repaint_screen();
+        result
+    }
+
     /// Show only the titles I have scored, best first. Turning it on
     /// switches the sort too — a rated-only list ordered by TMDB's score
     /// would bury my own ranking.
@@ -1213,6 +1330,20 @@ impl App {
     }
 
     // --- My ratings ---
+
+    /// Which TMDB endpoint owns an id, when we know. Movie and tv ids are
+    /// SEPARATE spaces — tv/67683 is Travelers, movie/67683 is a 1969
+    /// Soviet comedy — so a details fetch that probes movie-then-tv can
+    /// come back with an unrelated film. Older catalog rows have no kind;
+    /// those still have to probe.
+    fn kind_of(&self, id: &str) -> Option<String> {
+        if let Some((it, _)) = self.any_lookup(id) {
+            if !it.kind.is_empty() { return Some(it.kind.clone()); }
+        }
+        if self.db.series.iter().any(|it| it.id == id) { return Some("tv".into()); }
+        if self.db.movies.iter().any(|it| it.id == id) { return Some("movie".into()); }
+        None
+    }
 
     /// Look a title up across BOTH lists. The rated set spans movies and
     /// series, so the view-scoped `list_lookup` would lose half of it.
@@ -1417,7 +1548,7 @@ impl App {
   y / Y          Set min / max year
 
 {}
-  /              Search TMDB and pick from the hits
+  /              Search TMDB — pick from the hits, blurb below the list
   I              Full fetch of top-rated lists (background)
   i              Incremental fetch of missing details
   f              Re-fetch current item

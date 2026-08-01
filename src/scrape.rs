@@ -306,7 +306,16 @@ fn extract_content_rating(v: &JsonValue, is_movie: bool, region: &str) -> String
 }
 
 /// Multi-search across movies and TV. Returns up to `max` items.
-pub fn search_keyed(query: &str, max: usize, api_key: &str) -> Vec<ListItem> {
+/// A search hit: the catalog row we would add, plus the blurb TMDB
+/// returns with it. The blurb is what tells four films called
+/// "Travellers" apart, but it has no business in `list.json`, so it
+/// rides alongside rather than inside `ListItem`.
+pub struct SearchHit {
+    pub item: ListItem,
+    pub overview: String,
+}
+
+pub fn search_keyed(query: &str, max: usize, api_key: &str) -> Vec<SearchHit> {
     if query.is_empty() || api_key.is_empty() { return Vec::new(); }
     let q = urlencode(query);
     let url = format!(
@@ -329,11 +338,15 @@ pub fn search_keyed(query: &str, max: usize, api_key: &str) -> Vec<ListItem> {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
             let rating = r.get("vote_average").and_then(|x| x.as_f64()).unwrap_or(0.0);
-            Some(ListItem {
-                id: id.to_string(),
-                title, rating, year,
-                genres: Vec::new(),
-                kind: mt.to_string(),
+            let overview = r.get("overview").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            Some(SearchHit {
+                item: ListItem {
+                    id: id.to_string(),
+                    title, rating, year,
+                    genres: Vec::new(),
+                    kind: mt.to_string(),
+                },
+                overview,
             })
         })
         .take(max)
