@@ -1338,7 +1338,21 @@ impl App {
         let mut popup = Popup::centered(w, h, 255, 234);
         popup.pane.wrap = true;
         popup.view(text);
+        self.repaint_screen();
+    }
+
+    /// Wipe and repaint the whole layout. A popup covers more than the
+    /// panes do — its own border, the gutters between panes, the pane
+    /// borders — and none of that belongs to a pane, so `render_all`
+    /// alone leaves the popup's crumbs on screen. The wipe takes care of
+    /// that, and the two `full_refresh` calls take care of the other
+    /// half: header and footer draw through `say`, which diffs against
+    /// the previous frame and would skip the very rows the wipe blanked.
+    fn repaint_screen(&mut self) {
+        Crust::clear_screen();
         self.render_all();
+        self.header.full_refresh();
+        self.footer.full_refresh();
     }
 
     fn show_help(&mut self) {
