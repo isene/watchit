@@ -78,7 +78,9 @@ lists' tconst entries will be stale until re-added via search (`/`).
 - **Focus-based borders** — the active pane highlights itself
 - **Poster display** inline in the detail pane (kitty/sixel/w3m via glow)
 - **Genre filtering**: include (`+`), exclude (`-`), or clear (`Space`) on the highlighted genre
-- **Rating / year filters**, sort by rating or alphabetical
+- **My own ratings** — score any title 1-10 with a single keypress, sorted and synced
+- **Claude recommendations** (`c`) and a **conversation about what to watch** (`C`), both grounded in what you rated
+- **Rating / year filters**, sort by TMDB rating, alphabetical, or my rating
 - **Wish and dump lists** separate for movies and series
 - **Multi-search** (`/`) across TMDB movies and TV
 - **Background threads** for fetch — UI never blocks
@@ -96,8 +98,13 @@ lists' tconst entries will be stale until re-added via search (`/`).
 | `+` | Add to Wish (list) / Include genre (genres) |
 | `-` | Dump (list) / Exclude genre / Remove (wish+dump) |
 | `Space` | Clear genre filter on highlighted genre |
+| `1`-`9` | Rate the highlighted title 1-9 |
+| `0` | Rate it 10 |
+| `DEL` | Clear my rating |
+| `c` | Ask Claude what to watch next |
+| `C` | Discuss recommendations with Claude |
 | `l` | Toggle Movies / Series view |
-| `o` | Toggle sort (rating / alphabetical) |
+| `o` | Cycle sort (TMDB rating / alphabetical / my rating) |
 | `r` | Set minimum rating |
 | `y` / `Y` | Set min / max year |
 | `/` | Search TMDB for new titles |
@@ -149,11 +156,23 @@ set, pick the region for streaming-availability lookups:
 ```
 ~/.watchit/
 ├── config.yml           # Your preferences (incl. tmdb_key, region)
-└── data/
-    ├── list.json        # Movie + series metadata (title, rating, year, genres)
-    ├── details.json     # Per-title details cache
-    └── *.jpg            # Poster images (TMDB IDs)
+├── data/
+│   ├── list.json        # Movie + series metadata (title, rating, year, genres)
+│   ├── details.json     # Per-title details cache
+│   └── *.jpg            # Poster images (TMDB IDs)
+└── sync/
+    └── ratings-*.json   # My ratings, one file per device (shared with the phone)
 ```
+
+### My ratings, and the phone
+
+Press a digit and the highlighted title carries your score. Ratings live in
+`~/.watchit/sync/`, one file per device — share that folder with the
+[nomad watchit app](https://github.com/isene/nomad) over Syncthing and both
+ends see every rating. Each device only ever writes its own file, so there is
+nothing for Syncthing to conflict over; per title, the newest rating wins.
+Clearing a rating is itself a timestamped event, so a clear on one device
+sticks on the other.
 
 ## Data Sources
 

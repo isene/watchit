@@ -1,10 +1,12 @@
+mod claude;
 mod config;
 mod data;
 mod import;
+mod ratings;
 mod scrape;
 
 use config::Config;
-use crust::{Crust, Input, Pane};
+use crust::{Crust, Input, Pane, Popup};
 use crust::style;
 use data::{Database, Details, DetailsCache, ListItem};
 use std::collections::HashSet;
@@ -88,6 +90,16 @@ fn main() {
             " " | "SPACE" => { app.clear_genre_filter(); app.render_all(); }
             "l" => { app.toggle_view(); app.render_all(); }
             "o" => { app.toggle_sort(); app.render_all(); }
+            // Rate the highlighted title outright: a digit IS the score,
+            // 0 stands for 10 (no other key gives a one-press rating).
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
+                app.rate(key.parse::<u8>().unwrap_or(0));
+                app.render_all();
+            }
+            "0" => { app.rate(10); app.render_all(); }
+            "DEL" | "BACK" => { app.rate(0); app.render_all(); }
+            "c" => { app.recommend(); }
+            "C" => { app.discuss(); }
             "r" => { app.set_rating_min(); app.render_all(); }
             "y" => { app.set_year_min(); app.render_all(); }
             "Y" => { app.set_year_max(); app.render_all(); }
@@ -159,6 +171,13 @@ struct App {
     /// Poster downloads still in flight. When they finish and the user is
     /// still looking at that id, we trigger a re-render.
     poster_rx: Option<mpsc::Receiver<String>>,
+
+    /// My own 1-10 scores, merged across every device that writes into
+    /// the shared sync folder.
+    ratings: ratings::Ratings,
+    /// A `claude -p` recommendation in flight. The TUI stays live while
+    /// it runs; the answer opens in a popup when it lands.
+    recs_rx: Option<mpsc::Receiver<Result<String, String>>>,
 }
 
 enum ScrapeResult {
@@ -191,6 +210,8 @@ impl App {
             current_poster: None,
             prefetch_busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             poster_rx: None,
+            ratings: ratings::Ratings::default(),
+            recs_rx: None,
         }
     }
 
@@ -247,6 +268,7 @@ impl App {
     fn load_all(&mut self) {
         self.db = Database::load(&config::list_path());
         self.details = data::load_details_cache(&config::details_path());
+        self.ratings = ratings::Ratings::load(&config::sync_dir());
         self.rebuild_genres();
         self.rebuild_filtered();
     }
@@ -281,6 +303,11 @@ impl App {
             .collect();
         match self.cfg.sort.as_str() {
             "alpha" => ids.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase())),
+            // My own score first, unrated last, TMDB rating breaking ties.
+            "mine" => ids.sort_by(|a, b| {
+                let (ma, mb) = (self.ratings.get(&a.0).unwrap_or(0), self.ratings.get(&b.0).unwrap_or(0));
+                mb.cmp(&ma).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+            }),
             _ => ids.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)),
         }
         self.filtered = ids.into_iter().map(|(i, _, _)| i).collect();
@@ -374,7 +401,13 @@ impl App {
                 title_part
             };
             let marker = if focused { "\u{2192} " } else { "  " };
-            lines.push(format!("{}{:>4.1}  {}", marker, rating, title_styled));
+            // My score next to the crowd's, padded to a fixed 3 columns
+            // BEFORE colouring — SGR bytes would break the alignment.
+            let mine = match self.ratings.get(id) {
+                Some(s) => style::fg(&format!("{:>3}", format!("\u{2605}{}", s)), 214),
+                None => "   ".to_string(),
+            };
+            lines.push(format!("{}{:>4.1} {} {}", marker, rating, mine, title_styled));
         }
         self.list.set_text(&lines.join("\n"));
         self.list.ix = self.compute_scroll(self.list_idx, self.filtered.len(), self.list.h as usize);
@@ -472,6 +505,14 @@ impl App {
         }
         lines.push(link_line);
         lines.push(String::new());
+
+        // My own score sits above TMDB's, and says so when it is missing
+        // — an empty line here would read as "rated 0".
+        let mine = match self.ratings.get(&id) {
+            Some(s) => style::bold(&style::fg(&format!("My rating: {}/10", s), 214)),
+            None => style::fg("My rating: – (press 1-9, 0 for 10)", 240),
+        };
+        lines.push(mine);
 
         if let Some(d) = det.as_ref() {
             if d.year > 0 || !d.runtime.is_empty() || d.rating > 0.0 {
@@ -804,7 +845,11 @@ impl App {
         self.rebuild_filtered();
     }
     fn toggle_sort(&mut self) {
-        self.cfg.sort = if self.cfg.sort == "rating" { "alpha".into() } else { "rating".into() };
+        self.cfg.sort = match self.cfg.sort.as_str() {
+            "rating" => "alpha".into(),
+            "alpha" => "mine".into(),
+            _ => "rating".into(),
+        };
         self.rebuild_filtered();
     }
 
@@ -979,6 +1024,25 @@ impl App {
 
     fn poll_async(&mut self) -> bool {
         let mut changed = false;
+        if let Some(rx) = self.recs_rx.take() {
+            match rx.try_recv() {
+                Ok(Ok(text)) => {
+                    let head = style::bold(&style::fg("What to watch next", 226));
+                    self.show_text(&format!("{}\n\n{}", head, text));
+                    self.footer_say(" Recommendations from Claude", 46);
+                    changed = true;
+                }
+                Ok(Err(e)) => {
+                    self.footer_say(&format!(" Claude: {}", e), 196);
+                    changed = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => { self.recs_rx = Some(rx); }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.footer_say(" Claude call died", 196);
+                    changed = true;
+                }
+            }
+        }
         if let Some(rx) = self.poster_rx.take() {
             match rx.try_recv() {
                 Ok(finished_id) => {
@@ -1105,35 +1169,196 @@ impl App {
         self.detail.full_refresh();
     }
 
+    // --- My ratings ---
+
+    /// Look a title up across BOTH lists. The rated set spans movies and
+    /// series, so the view-scoped `list_lookup` would lose half of it.
+    fn any_lookup(&self, id: &str) -> Option<(&ListItem, &'static str)> {
+        self.db.movies.iter().find(|it| it.id == id).map(|it| (it, "Movie"))
+            .or_else(|| self.db.series.iter().find(|it| it.id == id).map(|it| (it, "Series")))
+    }
+
+    fn seen_of(&self, id: &str, score: Option<u8>) -> Option<claude::Seen> {
+        if let Some((it, kind)) = self.any_lookup(id) {
+            return Some(claude::Seen {
+                title: it.title.clone(), year: self.item_year(it),
+                kind: kind.to_string(), score,
+            });
+        }
+        // Dropped from the catalog but still rated / wished: the details
+        // cache remembers it.
+        self.details.get(id).map(|d| claude::Seen {
+            title: d.title.clone(), year: d.year,
+            kind: if d.kind == "TVSeries" { "Series".into() } else { "Movie".into() },
+            score,
+        })
+    }
+
+    /// Score the highlighted title 1-10, or clear it with 0. Works from
+    /// the list, the wish pane and the dump pane alike.
+    fn rate(&mut self, score: u8) {
+        let Some(id) = self.current_id() else { return };
+        let title = self.seen_of(&id, None).map(|s| s.title).unwrap_or_else(|| id.clone());
+        self.ratings.set(&id, score);
+        if score == 0 {
+            self.footer_say(&format!(" Cleared my rating for {}", title), 244);
+        } else {
+            self.footer_say(&format!(" {} — my rating: {}/10", title, score), 46);
+        }
+        if self.cfg.sort == "mine" { self.rebuild_filtered(); }
+    }
+
+    // --- Claude ---
+
+    /// Everything Claude needs to know about my taste: what I scored,
+    /// what I already want, what I threw out.
+    fn taste(&self) -> String {
+        let rated: Vec<claude::Seen> = self.ratings.rated().iter()
+            .filter_map(|(id, s)| self.seen_of(id, Some(*s)))
+            .collect();
+        let ids = |v: &Vec<String>| -> Vec<claude::Seen> {
+            v.iter().filter_map(|id| self.seen_of(id, self.ratings.get(id))).collect()
+        };
+        let mut wish = ids(&self.cfg.wish_movies);
+        wish.extend(ids(&self.cfg.wish_series));
+        let mut dump = ids(&self.cfg.dump_movies);
+        dump.extend(ids(&self.cfg.dump_series));
+        // The dump list is a bin, not a profile — a few dozen is plenty
+        // of negative signal without swamping the prompt.
+        dump.truncate(60);
+        claude::taste(&rated, &wish, &dump)
+    }
+
+    /// One-shot recommendations. Runs off the UI thread so the TUI stays
+    /// live for the ~20 s the model takes; the answer opens in a popup.
+    fn recommend(&mut self) {
+        if self.recs_rx.is_some() {
+            self.footer_say(" Already asking Claude — hang on", 226);
+            return;
+        }
+        if !claude::available() {
+            self.footer_say(" Recommendations need the `claude` CLI on PATH", 196);
+            return;
+        }
+        if self.ratings.count() == 0 {
+            self.footer_say(" Rate a few titles first (1-9, 0 = 10)", 226);
+            return;
+        }
+        let want = self.footer.ask(" In the mood for (blank = anything): ", "");
+        let prompt = claude::recommend_prompt(&self.taste(), 8, &want);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || { let _ = tx.send(claude::ask(&prompt)); });
+        self.recs_rx = Some(rx);
+        self.footer_say(" Asking Claude for recommendations…", 81);
+    }
+
+    /// Hand the terminal to an interactive `claude`, seeded with my
+    /// taste, so recommendations can be argued about. `/exit` there
+    /// comes back here.
+    fn discuss(&mut self) {
+        if !claude::available() {
+            self.footer_say(" Discussion needs the `claude` CLI on PATH", 196);
+            return;
+        }
+        let prompt = claude::discuss_prompt(&self.taste());
+        self.clear_poster();
+        // Give claude a clean terminal: same handshake amar and kastrup use.
+        use std::io::Write as _;
+        Crust::disable_bracketed_paste();
+        let _ = std::io::stdout().flush();
+        Crust::cleanup();
+        Crust::clear_screen();
+
+        let status = std::process::Command::new("claude").arg(&prompt).status();
+
+        Crust::init();
+        Crust::enable_bracketed_paste();
+        let _ = std::io::stdout().flush();
+        Crust::clear_screen();
+        // The terminal may have been resized during the session.
+        self.rebuild_panes();
+        self.render_all();
+        match status {
+            Ok(s) if s.success() => self.footer_say(" Back from Claude", 46),
+            Ok(s) => self.footer_say(&format!(" Claude exited with {}", s), 226),
+            Err(e) => self.footer_say(&format!(" Could not launch claude: {}", e), 196),
+        }
+    }
+
+    fn rebuild_panes(&mut self) {
+        let (cols, rows) = Crust::terminal_size();
+        self.cols = cols;
+        self.rows = rows;
+        let (header, list, genres, wish, dump, detail, footer) = Self::build_panes(cols, rows);
+        self.header = header;
+        self.list = list;
+        self.genres = genres;
+        self.wish = wish;
+        self.dump = dump;
+        self.detail = detail;
+        self.footer = footer;
+        self.apply_focus_border();
+    }
+
+    /// Long text in the middle of the screen. The poster is drawn OVER
+    /// the detail pane, so anything that has to be readable goes here
+    /// instead of into that pane.
+    fn show_text(&mut self, text: &str) {
+        self.clear_poster();
+        let w = self.cols.saturating_sub(8).min(100).max(40);
+        let h = self.rows.saturating_sub(6).max(10);
+        let mut popup = Popup::centered(w, h, 255, 234);
+        popup.pane.wrap = true;
+        popup.view(text);
+        self.render_all();
+    }
+
     fn show_help(&mut self) {
-        let help = "\n \
-            watchit — TMDB top-rated browser\n\n \
-            KEYS\n \
-              TAB / S-TAB    Switch focus between panes\n \
-              j/k  UP/DOWN   Move within the focused pane\n \
-              PgUP / PgDOWN  Page\n \
-              +              Wish list (list) / Include genre (genres)\n \
-              -              Dump (list) / Exclude genre / Remove (wish+dump)\n \
-              Space          Clear genre filter on highlighted genre\n \
-              l              Toggle Movies/Series view\n \
-              o              Toggle sort (rating / alphabetical)\n \
-              r              Set minimum rating\n \
-              y / Y          Set min / max year\n \
-              /              Search TMDB for new titles\n \
-              I              Full fetch of top-rated lists (background)\n \
-              i              Incremental fetch of missing details\n \
-              f              Re-fetch current item\n \
-              v              Verify data (fetch first 20 missing)\n \
-              L              Load additional lists (popular movies + TV)\n \
-              D              Remove duplicate entries\n \
-              K              Set TMDB API key (required — see README)\n \
-              R              Set streaming region\n \
-              W              Save config now\n \
-              ? / q          Help / Quit\n";
-        self.detail.set_text(help);
-        self.detail.full_refresh();
-        let _ = Input::getchr(None);
-        self.render_detail();
+        let help = format!("\
+{}
+
+  TAB / S-TAB    Switch focus between panes
+  j/k  UP/DOWN   Move within the focused pane
+  PgUP / PgDOWN  Page
+
+{}
+  1-9            Rate the highlighted title (1-9)
+  0              Rate it 10
+  DEL            Clear my rating
+  c              Ask Claude what to watch next
+  C              Discuss recommendations with Claude
+
+{}
+  +              Wish list (list) / Include genre (genres)
+  -              Dump (list) / Exclude genre / Remove (wish+dump)
+  Space          Clear genre filter on highlighted genre
+  l              Toggle Movies/Series view
+  o              Cycle sort (TMDB rating / alphabetical / my rating)
+  r              Set minimum rating
+  y / Y          Set min / max year
+
+{}
+  /              Search TMDB for new titles
+  I              Full fetch of top-rated lists (background)
+  i              Incremental fetch of missing details
+  f              Re-fetch current item
+  v              Verify data (fetch first 20 missing)
+  L              Load additional lists (popular movies + TV)
+  D              Remove duplicate entries
+  K              Set TMDB API key (required — see README)
+  R              Set streaming region
+  W              Save config now
+
+  ? / q          This help / Quit
+
+{}",
+            style::bold(&style::fg("watchit — movies and series, rated my way", 226)),
+            style::bold(&style::fg("MY RATINGS", 81)),
+            style::bold(&style::fg("BROWSING", 81)),
+            style::bold(&style::fg("DATA", 81)),
+            style::fg("  ESC / q / ENTER closes  ·  j/k scrolls", 240),
+        );
+        self.show_text(&help);
     }
 }
 
