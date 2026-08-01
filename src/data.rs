@@ -10,6 +10,12 @@ pub struct ListItem {
     pub year: i32,
     #[serde(default)]
     pub genres: Vec<String>,
+    /// "movie" or "tv" — which TMDB endpoint owns this id. Defaulted, so
+    /// an older list.json still loads; search fills it in so a picked
+    /// title lands in the right list instead of whichever view happened
+    /// to be open.
+    #[serde(default)]
+    pub kind: String,
 }
 
 /// Per-title extended details. Superset of the Ruby IMDB details format and

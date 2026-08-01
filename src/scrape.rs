@@ -82,6 +82,7 @@ pub fn scrape_chart_keyed(chart: &str, limit: usize, api_key: &str) -> Vec<ListI
                 id: id.to_string(),
                 title, rating, year,
                 genres: Vec::new(),  // genres come on details fetch
+                kind: kind.to_string(),
             });
             if out.len() >= limit { return out; }
         }
@@ -332,6 +333,7 @@ pub fn search_keyed(query: &str, max: usize, api_key: &str) -> Vec<ListItem> {
                 id: id.to_string(),
                 title, rating, year,
                 genres: Vec::new(),
+                kind: mt.to_string(),
             })
         })
         .take(max)

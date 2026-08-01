@@ -68,10 +68,12 @@ fn main() {
         };
         if app.poll_async() { app.render_all(); }
 
-        if app.search_mode {
-            app.handle_search_key(&key);
-            app.render_all();
-            continue;
+        // A status line reports on the key you just pressed; by the time
+        // you press the next one it is stale, and it was sitting on top
+        // of the prompt line every prompt uses.
+        if app.status_msg.is_some() {
+            app.status_msg = None;
+            app.render_footer();
         }
 
         match key.as_str() {
@@ -103,7 +105,8 @@ fn main() {
             "r" => { app.set_rating_min(); app.render_all(); }
             "y" => { app.set_year_min(); app.render_all(); }
             "Y" => { app.set_year_max(); app.render_all(); }
-            "/" => { app.begin_search(); app.render_all(); }
+            "/" => { app.search_titles(); }
+            "m" => { app.toggle_only_rated(); app.render_all(); }
             "I" => { app.start_full_scrape(); app.render_all(); }
             "i" => { app.start_incremental(); app.render_all(); }
             "f" => { app.refetch_current(); app.render_all(); }
@@ -151,10 +154,9 @@ struct App {
     // Filtered ids for current view (keeps ordering stable between renders).
     filtered: Vec<String>,
 
-    search_mode: bool,
-    search_buf: String,
-    search_results: Vec<ListItem>,
-    search_idx: usize,
+    /// Show only what I have rated, highest first. A session toggle —
+    /// it is a way of looking at the list, not a saved preference.
+    only_rated: bool,
 
     // Async: background scrape/fetch tasks.
     scrape_rx: Option<mpsc::Receiver<ScrapeResult>>,
@@ -199,10 +201,7 @@ impl App {
             list_idx: 0, genre_idx: 0, wish_idx: 0, dump_idx: 0,
             all_genres: Vec::new(),
             filtered: Vec::new(),
-            search_mode: false,
-            search_buf: String::new(),
-            search_results: Vec::new(),
-            search_idx: 0,
+            only_rated: false,
             scrape_rx: None,
             detail_rx: None,
             status_msg: None,
@@ -295,7 +294,10 @@ impl App {
         };
         let mut ids: Vec<(String, f64, String)> = source.iter()
             .filter(|it| !dump_set.contains(&it.id))
-            .filter(|it| it.rating >= self.cfg.rating_min)
+            .filter(|it| self.only_rated
+                || it.rating >= self.cfg.rating_min)
+            .filter(|it| !self.only_rated
+                || self.ratings.get(&it.id, &it.title, self.item_year(it)).is_some())
             .filter(|it| self.cfg.year_min == 0 || self.item_year(it) >= self.cfg.year_min)
             .filter(|it| self.cfg.year_max == 0 || self.item_year(it) <= self.cfg.year_max)
             .filter(|it| self.matches_genres(it))
@@ -379,7 +381,8 @@ impl App {
             self.cfg.sort,
         );
         let counts = format!("M:{}  S:{}", self.db.movies.len(), self.db.series.len());
-        let text = format!(" watchit  [{}]  {}  •  {}", view, filter, counts);
+        let scope = if self.only_rated { "  \u{2605} rated only" } else { "" };
+        let text = format!(" watchit  [{}{}]  {}  •  {}", view, scope, filter, counts);
         self.header.say(&style::bold(&text));
     }
 
@@ -686,7 +689,7 @@ impl App {
         if let Some((ref msg, color)) = self.status_msg {
             self.footer.say(&style::fg(msg, color));
         } else {
-            let hint = " ?:Help  TAB:Focus  j/k:Move  +/-:Wish/Dump  /:Search  l:Movies/Series  o:Sort  r/y/Y:Filter  I:Scrape  f:Fetch  k:TMDb  R:Region  q:Quit";
+            let hint = " ?:Help  TAB:Focus  j/k:Move  1-9/0:Rate  m:Mine  +/-:Wish/Dump  /:Search  c/C:Claude  l:Movies/Series  o:Sort  q:Quit";
             self.footer.say(&style::fg(hint, 245));
         }
     }
@@ -1121,60 +1124,92 @@ impl App {
 
     // --- Search ---
 
-    fn begin_search(&mut self) {
-        self.search_mode = true;
-        self.search_buf.clear();
-        self.search_results.clear();
-        self.search_idx = 0;
+    /// Search TMDB and pick from the hits in a popup.
+    ///
+    /// This used to draw the query and the results into the detail pane,
+    /// which the poster is painted over and which `render_all` rewrites
+    /// on the next keypress — so the typing was invisible and the hits
+    /// flickered away. A popup owns the screen while it is up, and
+    /// `modal` gives the selection for free.
+    fn search_titles(&mut self) {
+        if self.cfg.tmdb_key.is_empty() {
+            self.footer_say(" Search needs a TMDB key — press K", 196);
+            return;
+        }
+        let query = self.footer.ask(" Search TMDB: ", "");
+        let query = query.trim().to_string();
+        if query.is_empty() { self.render_footer(); return; }
+
+        self.footer_say(&format!(" Searching TMDB for \u{201c}{}\u{201d}…", query), 81);
+        let hits = scrape::search_keyed(&query, 30, &self.cfg.tmdb_key);
+        if hits.is_empty() {
+            self.footer_say(&format!(" Nothing found for \u{201c}{}\u{201d}", query), 226);
+            return;
+        }
+
+        let lines: Vec<String> = hits.iter().map(|h| {
+            let kind = if h.kind == "tv" { "Series" } else { "Movie " };
+            let year = if h.year > 0 { h.year.to_string() } else { "----".into() };
+            let known = self.any_lookup(&h.id).is_some();
+            let mark = if known { "\u{2713}" } else { " " };
+            format!("{} {}  {}  {:>4.1}  {}", mark, kind, year, h.rating, h.title)
+        }).collect();
+
+        self.clear_poster();
+        self.footer_say(" j/k to move · ENTER adds it to your list · ESC cancels", 81);
+        let w = self.cols.saturating_sub(8).min(90).max(40);
+        let h = (lines.len() as u16 + 2).min(self.rows.saturating_sub(6)).max(5);
+        let mut popup = Popup::centered(w, h, 255, 234);
+        let pick = popup.modal(&lines.join("\n"));
+        self.repaint_screen();
+
+        let Some(i) = pick else { return };
+        let Some(hit) = hits.get(i).cloned() else { return };
+        // Route by what TMDB says it is, NOT by the view that happens to
+        // be open — searching for a series from the movie list used to
+        // file it under movies, where it never showed up again.
+        let is_series = hit.kind == "tv";
+        let list = if is_series { &mut self.db.series } else { &mut self.db.movies };
+        if list.iter().any(|it| it.id == hit.id) {
+            self.footer_say(&format!(" {} is already in your list", hit.title), 226);
+            return;
+        }
+        list.push(hit.clone());
+        self.db.save(&config::list_path());
+        // Show it: jump to the list it landed in, and fetch its details
+        // so the pane has something to say about it.
+        self.cfg.view = if is_series { "series".into() } else { "movies".into() };
+        self.only_rated = false;
+        self.rebuild_filtered();
+        if let Some(pos) = self.filtered.iter().position(|id| *id == hit.id) {
+            self.list_idx = pos;
+            self.focus = Focus::List;
+            self.apply_focus_border();
+        }
+        self.render_all();
+        // Pull its details in the background, then say what happened —
+        // refetch_current posts its own status, so saying it first would
+        // just be overwritten.
+        self.refetch_current();
+        self.footer_say(&format!(" Added {} to {} — fetching details", hit.title,
+            if is_series { "Series" } else { "Movies" }), 46);
     }
-    fn handle_search_key(&mut self, key: &str) {
-        match key {
-            "ESC" => { self.search_mode = false; }
-            "ENTER" => {
-                if self.search_results.is_empty() {
-                    self.search_results = scrape::search_keyed(&self.search_buf, 10, &self.cfg.tmdb_key);
-                } else if let Some(hit) = self.search_results.get(self.search_idx).cloned() {
-                    // Add to current view's list if not present.
-                    let src = if self.cfg.view == "movies" { &mut self.db.movies } else { &mut self.db.series };
-                    if !src.iter().any(|it| it.id == hit.id) {
-                        src.push(hit.clone());
-                        self.db.save(&config::list_path());
-                        self.rebuild_filtered();
-                    }
-                    self.search_mode = false;
-                }
-            }
-            "TAB" | "DOWN" => {
-                if !self.search_results.is_empty() {
-                    self.search_idx = (self.search_idx + 1) % self.search_results.len();
-                }
-            }
-            "S-TAB" | "BACKTAB" | "UP" => {
-                if !self.search_results.is_empty() {
-                    if self.search_idx == 0 { self.search_idx = self.search_results.len() - 1; }
-                    else { self.search_idx -= 1; }
-                }
-            }
-            "BACKSPACE" => { self.search_buf.pop(); self.search_results.clear(); }
-            k if k.len() == 1 => { self.search_buf.push_str(k); self.search_results.clear(); }
-            _ => {}
+
+    /// Show only the titles I have scored, best first. Turning it on
+    /// switches the sort too — a rated-only list ordered by TMDB's score
+    /// would bury my own ranking.
+    fn toggle_only_rated(&mut self) {
+        self.only_rated = !self.only_rated;
+        if self.only_rated {
+            self.cfg.sort = "mine".into();
         }
-        // Render search overlay in detail pane.
-        let mut lines = vec![
-            style::bold(&style::fg(&format!("Search: {}_", self.search_buf), 226)),
-            String::new(),
-        ];
-        if self.search_results.is_empty() {
-            lines.push(style::fg("(Enter to search, ESC to cancel)", 245));
+        self.list_idx = 0;
+        self.rebuild_filtered();
+        if self.only_rated {
+            self.footer_say(&format!(" My ratings only — {} titles", self.filtered.len()), 214);
         } else {
-            for (i, r) in self.search_results.iter().enumerate() {
-                let marker = if i == self.search_idx { "→ " } else { "  " };
-                let year = if r.year > 0 { format!(" ({})", r.year) } else { String::new() };
-                lines.push(format!("{}{}{}", marker, r.title, year));
-            }
+            self.footer_say(" Showing everything again", 245);
         }
-        self.detail.set_text(&lines.join("\n"));
-        self.detail.full_refresh();
     }
 
     // --- My ratings ---
@@ -1367,6 +1402,7 @@ impl App {
   1-9            Rate the highlighted title (1-9)
   0              Rate it 10
   DEL            Clear my rating
+  m              Show only what I have rated, best first
   c              Ask Claude what to watch next
   C              Discuss recommendations with Claude
                  (both stay inside the genre filter you have set)
@@ -1381,7 +1417,7 @@ impl App {
   y / Y          Set min / max year
 
 {}
-  /              Search TMDB for new titles
+  /              Search TMDB and pick from the hits
   I              Full fetch of top-rated lists (background)
   i              Incremental fetch of missing details
   f              Re-fetch current item

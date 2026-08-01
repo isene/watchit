@@ -82,7 +82,7 @@ lists' tconst entries will be stale until re-added via search (`/`).
 - **Claude recommendations** (`c`) and a **conversation about what to watch** (`C`), both grounded in what you rated and scoped to the genre filter you have set
 - **Rating / year filters**, sort by TMDB rating, alphabetical, or my rating
 - **Wish and dump lists** separate for movies and series
-- **Multi-search** (`/`) across TMDB movies and TV
+- **Multi-search** (`/`) across TMDB movies and TV, picked from a popup and filed by what it actually is
 - **Background threads** for fetch — UI never blocks
 - **Verify (`v`)** — fetch missing details; **Refetch (`f`)** — re-pull current item
 - **Duplicate removal (`D`)** across all lists
@@ -101,13 +101,14 @@ lists' tconst entries will be stale until re-added via search (`/`).
 | `1`-`9` | Rate the highlighted title 1-9 |
 | `0` | Rate it 10 |
 | `DEL` | Clear my rating |
+| `m` | Show only titles I have rated, best first |
 | `c` | Ask Claude what to watch next (inside the genre filter) |
 | `C` | Discuss recommendations with Claude (same scope) |
 | `l` | Toggle Movies / Series view |
 | `o` | Cycle sort (TMDB rating / alphabetical / my rating) |
 | `r` | Set minimum rating |
 | `y` / `Y` | Set min / max year |
-| `/` | Search TMDB for new titles |
+| `/` | Search TMDB and pick from the hits (popup) |
 | `I` | Fetch top-rated movies + TV (background) |
 | `i` | Incremental fetch of missing details |
 | `f` | Re-fetch current item |
