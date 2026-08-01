@@ -1029,7 +1029,13 @@ impl App {
         if let Some(rx) = self.recs_rx.take() {
             match rx.try_recv() {
                 Ok(Ok(text)) => {
-                    let head = style::bold(&style::fg("What to watch next", 226));
+                    let scope = claude::genre_label(&self.cfg.genres_include, &self.cfg.genres_exclude);
+                    let title = if scope.is_empty() {
+                        "What to watch next".to_string()
+                    } else {
+                        format!("What to watch next — {}", scope)
+                    };
+                    let head = style::bold(&style::fg(&title, 226));
                     self.show_text(&format!("{}\n\n{}", head, text));
                     self.footer_say(" Recommendations from Claude", 46);
                     changed = true;
@@ -1258,11 +1264,19 @@ impl App {
             return;
         }
         let want = self.footer.ask(" In the mood for (blank = anything): ", "");
-        let prompt = claude::recommend_prompt(&self.taste(), 8, &want);
+        // The genre filter scopes the recommendations too — the list on
+        // screen obeys it, so the suggestions have to as well.
+        let genres = claude::genre_rule(&self.cfg.genres_include, &self.cfg.genres_exclude);
+        let prompt = claude::recommend_prompt(&self.taste(), 8, &want, &genres);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || { let _ = tx.send(claude::ask(&prompt)); });
         self.recs_rx = Some(rx);
-        self.footer_say(" Asking Claude for recommendations…", 81);
+        let scope = claude::genre_label(&self.cfg.genres_include, &self.cfg.genres_exclude);
+        if scope.is_empty() {
+            self.footer_say(" Asking Claude for recommendations…", 81);
+        } else {
+            self.footer_say(&format!(" Asking Claude for recommendations — {}", scope), 81);
+        }
     }
 
     /// Hand the terminal to an interactive `claude`, seeded with my
@@ -1273,7 +1287,8 @@ impl App {
             self.footer_say(" Discussion needs the `claude` CLI on PATH", 196);
             return;
         }
-        let prompt = claude::discuss_prompt(&self.taste());
+        let genres = claude::genre_rule(&self.cfg.genres_include, &self.cfg.genres_exclude);
+        let prompt = claude::discuss_prompt(&self.taste(), &genres);
         self.clear_poster();
         // Give claude a clean terminal: same handshake amar and kastrup use.
         use std::io::Write as _;
@@ -1340,6 +1355,7 @@ impl App {
   DEL            Clear my rating
   c              Ask Claude what to watch next
   C              Discuss recommendations with Claude
+                 (both stay inside the genre filter you have set)
 
 {}
   +              Wish list (list) / Include genre (genres)
