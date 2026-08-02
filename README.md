@@ -79,7 +79,8 @@ lists' tconst entries will be stale until re-added via search (`/`).
 - **Poster display** inline in the detail pane (kitty/sixel/w3m via glow)
 - **Genre filtering**: include (`+`), exclude (`-`), or clear (`Space`) on the highlighted genre
 - **My own ratings** — score any title 1-10 with a single keypress, sorted and synced
-- **Claude recommendations** (`c`) and a **conversation about what to watch** (`C`), both grounded in what you rated and scoped to the genre filter you have set
+- **Claude recommendations** (`c`) grounded in what you rated, scoped to the current view and genre filter, and picked from: ENTER adds a title to the list, `w` adds it and wishlists it
+- **A conversation about what to watch** (`C`), seeded with the same taste profile
 - **Rating / year filters**, sort by TMDB rating, alphabetical, or my rating
 - **Wish and dump lists** separate for movies and series
 - **Multi-search** (`/`) across TMDB movies and TV: pick from the hits with the highlighted one's description under the list, filed by what it actually is
@@ -102,7 +103,7 @@ lists' tconst entries will be stale until re-added via search (`/`).
 | `0` | Rate it 10 |
 | `DEL` | Clear my rating |
 | `m` | Show only titles I have rated, best first |
-| `c` | Ask Claude what to watch next (inside the genre filter) |
+| `c` | Ask Claude what to watch next, then pick: ENTER adds, `w` adds + wishlists |
 | `C` | Discuss recommendations with Claude (same scope) |
 | `l` | Toggle Movies / Series view |
 | `o` | Cycle sort (TMDB rating / alphabetical / my rating) |

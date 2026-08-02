@@ -1088,15 +1088,7 @@ impl App {
         if let Some(rx) = self.recs_rx.take() {
             match rx.try_recv() {
                 Ok(Ok(text)) => {
-                    let scope = claude::genre_label(&self.cfg.genres_include, &self.cfg.genres_exclude);
-                    let title = if scope.is_empty() {
-                        "What to watch next".to_string()
-                    } else {
-                        format!("What to watch next — {}", scope)
-                    };
-                    let head = style::bold(&style::fg(&title, 226));
-                    self.show_text(&format!("{}\n\n{}", head, text));
-                    self.footer_say(" Recommendations from Claude", 46);
+                    self.offer_recs(&text);
                     changed = true;
                 }
                 Ok(Err(e)) => {
@@ -1238,17 +1230,27 @@ impl App {
             if is_series { "Series" } else { "Movies" }), 46);
     }
 
-    /// The picker itself: a list of hits with the highlighted one's blurb
-    /// underneath. Its own loop rather than `Popup::modal`, because modal
-    /// is one line per item and returns only the final choice — there is
-    /// nowhere to hang the "what IS this one" panel that makes the choice
-    /// possible.
-    fn pick_search_hit(&mut self, query: &str, hits: &[scrape::SearchHit]) -> Option<usize> {
-        self.clear_poster();
+    /// A list with the highlighted row's detail underneath, and its own
+    /// input loop. `Popup::modal` is one line per item and returns only
+    /// the final choice — there is nowhere to hang the panel that makes
+    /// the choice possible, and no way to offer more than one action.
+    ///
+    /// `rows` are redrawn from the closure each pass, so a caller can
+    /// mark them as it goes. Returns on any key in `act` with the row it
+    /// was pressed on; ESC / q returns None.
+    fn pick_from(
+        &mut self,
+        header: &str,
+        rows: &[String],
+        infos: &[String],
+        act: &[&str],
+        start: usize,
+    ) -> Option<(usize, String)> {
+        if rows.is_empty() { return None; }
         let w = self.cols.saturating_sub(8).min(96).max(46);
         let x = (self.cols.saturating_sub(w)) / 2;
-        let info_h = 7u16;
-        let list_h = (hits.len() as u16 + 1).min(self.rows.saturating_sub(info_h + 8)).max(4);
+        let info_h = 8u16;
+        let list_h = (rows.len() as u16 + 1).min(self.rows.saturating_sub(info_h + 8)).max(4);
         let total_h = list_h + info_h + 3;
         let y = (self.rows.saturating_sub(total_h)) / 2 + 1;
 
@@ -1261,24 +1263,46 @@ impl App {
         info.border_fg = Some(240);
         info.wrap = true;
 
-        let mut idx = 0usize;
-        let mut result = None;
+        let mut idx = start.min(rows.len() - 1);
+        let mut out = None;
         loop {
-            let rows: Vec<String> = hits.iter().enumerate().map(|(i, h)| {
-                let it = &h.item;
-                let kind = if it.kind == "tv" { "Series" } else { "Movie " };
-                let year = if it.year > 0 { it.year.to_string() } else { "----".into() };
-                let have = if self.any_lookup(&it.id).is_some() { "\u{2713}" } else { " " };
-                let line = format!("{} {}  {}  {:>4.1}  {}", have, kind, year, it.rating, it.title);
-                if i == idx { style::bold(&style::fg(&line, 226)) } else { line }
+            let drawn: Vec<String> = rows.iter().enumerate().map(|(i, r)| {
+                if i == idx { style::bold(&style::fg(r, 226)) } else { r.clone() }
             }).collect();
-            list.set_text(&format!("{}\n{}",
-                style::bold(&style::fg(&format!("Search: {}   ({} hits)", query, hits.len()), 81)),
-                rows.join("\n")));
-            list.ix = self.compute_scroll(idx + 1, hits.len() + 1, list_h as usize);
+            list.set_text(&format!("{}\n{}", style::bold(&style::fg(header, 81)), drawn.join("\n")));
+            list.ix = self.compute_scroll(idx + 1, rows.len() + 1, list_h as usize);
             list.full_refresh();
+            info.set_text(infos.get(idx).map(String::as_str).unwrap_or(""));
+            info.ix = 0;
+            info.full_refresh();
 
-            let h = &hits[idx];
+            let Some(key) = Input::getchr(None) else { continue };
+            if act.contains(&key.as_str()) { out = Some((idx, key)); break; }
+            match key.as_str() {
+                "ESC" | "q" => break,
+                "j" | "DOWN" | "TAB" => { idx = (idx + 1) % rows.len(); }
+                "k" | "UP" | "S-TAB" | "BACKTAB" => {
+                    idx = if idx == 0 { rows.len() - 1 } else { idx - 1 };
+                }
+                "PgDOWN" => { idx = (idx + list_h as usize).min(rows.len() - 1); }
+                "PgUP" => { idx = idx.saturating_sub(list_h as usize); }
+                "HOME" => { idx = 0; }
+                "END" => { idx = rows.len() - 1; }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn pick_search_hit(&mut self, query: &str, hits: &[scrape::SearchHit]) -> Option<usize> {
+        let rows: Vec<String> = hits.iter().map(|h| {
+            let it = &h.item;
+            let kind = if it.kind == "tv" { "Series" } else { "Movie " };
+            let year = if it.year > 0 { it.year.to_string() } else { "----".into() };
+            let have = if self.any_lookup(&it.id).is_some() { "\u{2713}" } else { " " };
+            format!("{} {}  {}  {:>4.1}  {}", have, kind, year, it.rating, it.title)
+        }).collect();
+        let infos: Vec<String> = hits.iter().map(|h| {
             let year = if h.item.year > 0 { h.item.year.to_string() } else { "year unknown".into() };
             let kind = if h.item.kind == "tv" { "Series" } else { "Movie" };
             let blurb = if h.overview.trim().is_empty() {
@@ -1286,30 +1310,136 @@ impl App {
             } else {
                 h.overview.clone()
             };
-            info.set_text(&format!("{}\n{}",
-                style::bold(&style::fg(
-                    &format!("{} · {} · {} · TMDB {:.1}", h.item.title, year, kind, h.item.rating), 226)),
-                blurb));
-            info.ix = 0;
-            info.full_refresh();
+            format!("{}\n{}", style::bold(&style::fg(
+                &format!("{} \u{b7} {} \u{b7} {} \u{b7} TMDB {:.1}",
+                    h.item.title, year, kind, h.item.rating), 226)), blurb)
+        }).collect();
+        let header = format!("Search: {}   ({} hits)   ENTER adds \u{b7} ESC cancels", query, hits.len());
+        self.clear_poster();
+        let pick = self.pick_from(&header, &rows, &infos, &["ENTER"], 0).map(|(i, _)| i);
+        self.repaint_screen();
+        pick
+    }
 
-            let Some(key) = Input::getchr(None) else { continue };
-            match key.as_str() {
-                "ESC" | "q" => break,
-                "ENTER" => { result = Some(idx); break; }
-                "j" | "DOWN" | "TAB" => { idx = (idx + 1) % hits.len(); }
-                "k" | "UP" | "S-TAB" | "BACKTAB" => {
-                    idx = if idx == 0 { hits.len() - 1 } else { idx - 1 };
+    /// Offer Claude's recommendations as something to act on, not just
+    /// read. ENTER marks a title for the list, `w` marks it for the list
+    /// AND the wish list; ESC applies whatever is marked.
+    ///
+    /// Nothing is fetched while marking. Each pick costs a TMDB lookup to
+    /// turn a title into a real catalog row, and doing that per keypress
+    /// would make the picker crawl for titles you then unmark.
+    fn offer_recs(&mut self, text: &str) {
+        let recs = claude::parse_recs(text);
+        if recs.is_empty() {
+            // The model ignored the format. Better to read it than to
+            // pretend there is nothing there.
+            let head = style::bold(&style::fg("What to watch next", 226));
+            self.show_text(&format!("{}\n\n{}", head, text));
+            return;
+        }
+
+        const NONE: u8 = 0;
+        const LIST: u8 = 1;
+        const WISH: u8 = 2;
+        let mut marks: Vec<u8> = vec![NONE; recs.len()];
+        let mut idx = 0usize;
+        let scope = claude::genre_label(&self.cfg.genres_include, &self.cfg.genres_exclude);
+        let header = format!(
+            "What to watch next{}{}   ENTER: add \u{b7} w: add + wish \u{b7} ESC: done",
+            if scope.is_empty() { "" } else { " \u{2014} " }, scope);
+
+        self.clear_poster();
+        loop {
+            let rows: Vec<String> = recs.iter().zip(marks.iter()).map(|(r, m)| {
+                let mark = match *m {
+                    LIST => style::fg("[+]", 46),
+                    WISH => style::fg("[\u{2665}]", 82),
+                    _ => "[ ]".to_string(),
+                };
+                let kind = if r.kind == "tv" { "Series" } else { "Movie " };
+                let year = if r.year > 0 { r.year.to_string() } else { "----".into() };
+                let have = if self.find_by_title(&r.title, r.year).is_some() { "\u{2713}" } else { " " };
+                format!("{} {} {}  {}  {}", mark, have, kind, year, r.title)
+            }).collect();
+            let infos: Vec<String> = recs.iter().map(|r| {
+                let year = if r.year > 0 { r.year.to_string() } else { "year unknown".into() };
+                let kind = if r.kind == "tv" { "Series" } else { "Movie" };
+                let known = match self.find_by_title(&r.title, r.year) {
+                    Some(_) => style::fg("\n\nAlready in your list.", 245),
+                    None => String::new(),
+                };
+                format!("{}\n{}{}", style::bold(&style::fg(
+                    &format!("{} \u{b7} {} \u{b7} {}", r.title, year, kind), 226)), r.why, known)
+            }).collect();
+
+            match self.pick_from(&header, &rows, &infos, &["ENTER", "w"], idx) {
+                Some((i, key)) => {
+                    idx = i;
+                    let want = if key == "w" { WISH } else { LIST };
+                    marks[i] = if marks[i] == want { NONE } else { want };
                 }
-                "PgDOWN" => { idx = (idx + list_h as usize).min(hits.len() - 1); }
-                "PgUP" => { idx = idx.saturating_sub(list_h as usize); }
-                "HOME" => { idx = 0; }
-                "END" => { idx = hits.len() - 1; }
-                _ => {}
+                None => break,
             }
         }
         self.repaint_screen();
-        result
+
+        let picked: Vec<(usize, u8)> = marks.iter().enumerate()
+            .filter(|(_, m)| **m != NONE).map(|(i, m)| (i, *m)).collect();
+        if picked.is_empty() {
+            self.footer_say(" Nothing added", 245);
+            return;
+        }
+        let (mut added, mut wished, mut missed) = (0usize, 0usize, 0usize);
+        for (i, mark) in picked {
+            let rec = &recs[i];
+            self.footer_say(&format!(" Looking up {}…", rec.title), 81);
+            let Some(item) = self.resolve_rec(rec) else { missed += 1; continue };
+            let is_series = item.kind == "tv";
+            let list = if is_series { &mut self.db.series } else { &mut self.db.movies };
+            if !list.iter().any(|it| it.id == item.id) {
+                list.push(item.clone());
+                added += 1;
+            }
+            if mark == WISH {
+                let wish = if is_series { &mut self.cfg.wish_series } else { &mut self.cfg.wish_movies };
+                if !wish.contains(&item.id) { wish.push(item.id.clone()); wished += 1; }
+            }
+        }
+        self.db.save(&config::list_path());
+        self.cfg.save();
+        self.rebuild_genres();
+        self.rebuild_filtered();
+        self.render_all();
+        let mut msg = format!(" Added {} to the list", added);
+        if wished > 0 { msg.push_str(&format!(", {} to the wish list", wished)); }
+        if missed > 0 { msg.push_str(&format!(" \u{b7} {} not found on TMDB", missed)); }
+        self.footer_say(&msg, 46);
+    }
+
+    /// Is this title already in the catalog? Recommendations come back as
+    /// text, so a title match is all there is to go on until it has been
+    /// looked up.
+    fn find_by_title(&self, title: &str, year: i32) -> Option<&ListItem> {
+        let norm = |s: &str| -> String {
+            s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+        };
+        let want = norm(title);
+        self.db.movies.iter().chain(self.db.series.iter())
+            .find(|it| norm(&it.title) == want && (year == 0 || it.year == 0 || (it.year - year).abs() <= 1))
+    }
+
+    /// Turn a recommended title into a real catalog row via TMDB. Prefers
+    /// a hit of the right kind whose year matches; a recommendation is a
+    /// title and a year, and TMDB will happily return a remake.
+    fn resolve_rec(&self, rec: &claude::Rec) -> Option<ListItem> {
+        let hits = scrape::search_keyed(&rec.title, 10, &self.cfg.tmdb_key);
+        if hits.is_empty() { return None; }
+        let same_kind: Vec<&scrape::SearchHit> =
+            hits.iter().filter(|h| h.item.kind == rec.kind).collect();
+        let pool = if same_kind.is_empty() { hits.iter().collect::<Vec<_>>() } else { same_kind };
+        let exact = pool.iter().find(|h| rec.year > 0 && h.item.year == rec.year);
+        let close = pool.iter().find(|h| rec.year > 0 && (h.item.year - rec.year).abs() <= 1);
+        Some(exact.or(close).unwrap_or(&pool[0]).item.clone())
     }
 
     /// Show only the titles I have scored, best first. Turning it on
@@ -1432,7 +1562,9 @@ impl App {
         let want = self.footer.ask(" In the mood for (blank = anything): ", "");
         // The genre filter scopes the recommendations too — the list on
         // screen obeys it, so the suggestions have to as well.
-        let genres = claude::genre_rule(&self.cfg.genres_include, &self.cfg.genres_exclude);
+        let genres = format!("{}{}",
+            claude::view_rule(&self.cfg.view),
+            claude::genre_rule(&self.cfg.genres_include, &self.cfg.genres_exclude));
         let prompt = claude::recommend_prompt(&self.taste(), 8, &want, &genres);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || { let _ = tx.send(claude::ask(&prompt)); });
@@ -1453,7 +1585,9 @@ impl App {
             self.footer_say(" Discussion needs the `claude` CLI on PATH", 196);
             return;
         }
-        let genres = claude::genre_rule(&self.cfg.genres_include, &self.cfg.genres_exclude);
+        let genres = format!("{}{}",
+            claude::view_rule(&self.cfg.view),
+            claude::genre_rule(&self.cfg.genres_include, &self.cfg.genres_exclude));
         let prompt = claude::discuss_prompt(&self.taste(), &genres);
         self.clear_poster();
         // Give claude a clean terminal: same handshake amar and kastrup use.
@@ -1534,9 +1668,10 @@ impl App {
   0              Rate it 10
   DEL            Clear my rating
   m              Show only what I have rated, best first
-  c              Ask Claude what to watch next
+  c              Ask Claude what to watch next, then pick from the
+                 answer: ENTER adds to the list, w adds + wishlists
   C              Discuss recommendations with Claude
-                 (both stay inside the genre filter you have set)
+                 (both stay in the current view and genre filter)
 
 {}
   +              Wish list (list) / Include genre (genres)
