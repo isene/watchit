@@ -517,8 +517,14 @@ impl App {
         // IMDB is shown alongside when TMDB has the external id on file
         // (Details.imdb_id from external_ids.imdb_id in fetch_details).
         // Clickable in kitty/foot/wezterm/iTerm2.
-        let kind = det.as_ref().map(|d| d.kind.as_str()).unwrap_or("");
-        let tmdb_path = if kind == "TVSeries" { "tv" } else { "movie" };
+        // Which endpoint the link points at: the details cache first, then
+        // the catalog row, then which list it lives in — a legacy row has
+        // no kind, and a series linked as /movie/<id> goes to a different
+        // film entirely (the ids are separate spaces).
+        let is_tv = det.as_ref().map(|d| d.kind == "TVSeries").unwrap_or(false)
+            || item.as_ref().map(|it| it.kind == "tv").unwrap_or(false)
+            || self.db.series.iter().any(|it| it.id == id);
+        let tmdb_path = if is_tv { "tv" } else { "movie" };
         let tmdb_url = format!("https://www.themoviedb.org/{}/{}", tmdb_path, id);
         let tmdb_link = style::hyperlink(
             &tmdb_url,
@@ -1204,30 +1210,85 @@ impl App {
         // be open — searching for a series from the movie list used to
         // file it under movies, where it never showed up again.
         let is_series = hit.kind == "tv";
-        let list = if is_series { &mut self.db.series } else { &mut self.db.movies };
-        if list.iter().any(|it| it.id == hit.id) {
-            self.footer_say(&format!(" {} is already in your list", hit.title), 226);
+        let known = {
+            let list = if is_series { &self.db.series } else { &self.db.movies };
+            list.iter().any(|it| it.id == hit.id)
+        };
+        if known {
+            // Go to it. "Already in your list" while the list refuses to
+            // show it is not an answer — that is exactly the case where
+            // you searched because you could not find it.
+            let why = self.reveal(&hit.id);
+            self.render_all();
+            self.footer_say(&format!(" {} is already in your list{}", hit.title, why), 226);
             return;
         }
+        let list = if is_series { &mut self.db.series } else { &mut self.db.movies };
         list.push(hit.clone());
         self.db.save(&config::list_path());
-        // Show it: jump to the list it landed in, and fetch its details
-        // so the pane has something to say about it.
-        self.cfg.view = if is_series { "series".into() } else { "movies".into() };
-        self.only_rated = false;
-        self.rebuild_filtered();
-        if let Some(pos) = self.filtered.iter().position(|id| *id == hit.id) {
-            self.list_idx = pos;
-            self.focus = Focus::List;
-            self.apply_focus_border();
-        }
+        // Show it, and fetch its details so the pane has something to say.
+        let why = self.reveal(&hit.id);
         self.render_all();
         // Pull its details in the background, then say what happened —
         // refetch_current posts its own status, so saying it first would
         // just be overwritten.
         self.refetch_current();
-        self.footer_say(&format!(" Added {} to {} — fetching details", hit.title,
-            if is_series { "Series" } else { "Movies" }), 46);
+        self.footer_say(&format!(" Added {} to {}{} — fetching details", hit.title,
+            if is_series { "Series" } else { "Movies" }, why), 46);
+    }
+
+    /// Put the cursor on a title, whatever it takes, and report what had
+    /// to give way.
+    ///
+    /// Switching to its list is not enough: a filter can hide it — 3 Body
+    /// Problem sits at 7.485 under a 7.5 minimum — and then the cursor
+    /// has nowhere to land. Anything hiding it is relaxed rather than
+    /// silently obeyed, because you only ask for a title you want to see.
+    fn reveal(&mut self, id: &str) -> String {
+        let Some((item, _)) = self.any_lookup(id) else { return String::new() };
+        let item = item.clone();
+        let is_series = self.db.series.iter().any(|it| it.id == id);
+        self.cfg.view = if is_series { "series".into() } else { "movies".into() };
+        let mut relaxed: Vec<String> = Vec::new();
+        if self.only_rated && self.ratings.get(id, &item.title, self.item_year(&item)).is_none() {
+            self.only_rated = false;
+            relaxed.push("left the rated-only view".into());
+        }
+        self.rebuild_filtered();
+
+        if !self.filtered.iter().any(|f| f == id) {
+            let year = self.item_year(&item);
+            if item.rating < self.cfg.rating_min {
+                self.cfg.rating_min = (item.rating * 10.0).floor() / 10.0;
+                relaxed.push(format!("dropped the rating filter to {:.1}", self.cfg.rating_min));
+            }
+            if self.cfg.year_min > 0 && year > 0 && year < self.cfg.year_min {
+                self.cfg.year_min = year;
+                relaxed.push(format!("dropped the min year to {}", year));
+            }
+            if self.cfg.year_max > 0 && year > 0 && year > self.cfg.year_max {
+                self.cfg.year_max = year;
+                relaxed.push(format!("raised the max year to {}", year));
+            }
+            if !self.matches_genres(&item) {
+                self.cfg.genres_include.clear();
+                self.cfg.genres_exclude.clear();
+                relaxed.push("cleared the genre filter".into());
+            }
+            let dump = if is_series { &mut self.cfg.dump_series } else { &mut self.cfg.dump_movies };
+            if let Some(pos) = dump.iter().position(|d| d == id) {
+                dump.remove(pos);
+                relaxed.push("took it off your dump list".into());
+            }
+            self.rebuild_filtered();
+        }
+
+        if let Some(pos) = self.filtered.iter().position(|f| f == id) {
+            self.list_idx = pos;
+            self.focus = Focus::List;
+            self.apply_focus_border();
+        }
+        if relaxed.is_empty() { String::new() } else { format!(" — {}", relaxed.join(", ")) }
     }
 
     /// A list with the highlighted row's detail underneath, and its own
