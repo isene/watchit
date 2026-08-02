@@ -98,6 +98,26 @@ impl Database {
     }
 }
 
+/// A title reduced to what identifies it: case and punctuation are not
+/// signal, and neither is the year range the old IMDB import baked into
+/// the title itself ("Travelers (2016-2018)"). Without stripping that,
+/// an imported row never matches its TMDB twin — not for deduplication,
+/// and not for finding the rating the phone made under the other id.
+pub fn normalize_title(title: &str) -> String {
+    let mut t = title.trim();
+    if t.ends_with(')') {
+        if let Some(open) = t.rfind('(') {
+            let inner = &t[open + 1..t.len() - 1];
+            let only_years = !inner.is_empty() && inner.chars().all(|c| {
+                c.is_ascii_digit() || c == '-' || c == '\u{2013}' || c == '\u{2014}'
+                    || c == ' ' || c == '/' || c == '?'
+            });
+            if only_years { t = t[..open].trim_end(); }
+        }
+    }
+    t.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
 pub type DetailsCache = HashMap<String, Details>;
 
 pub fn load_details_cache(path: &std::path::Path) -> DetailsCache {
@@ -195,5 +215,19 @@ pub fn save_details_cache(path: &std::path::Path, cache: &DetailsCache) {
     }
     if let Ok(s) = serde_json::to_string_pretty(cache) {
         let _ = std::fs::write(path, s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_imports_year_range_is_not_part_of_the_title() {
+        assert_eq!(normalize_title("Travelers (2016\u{2013}2018)"), normalize_title("Travelers"));
+        assert_eq!(normalize_title("Altered Carbon (2018\u{2013}2020)"), "alteredcarbon");
+        // A parenthetical that is not a year range stays: it distinguishes.
+        assert_ne!(normalize_title("Alien (Director's Cut)"), normalize_title("Alien"));
+        assert_eq!(normalize_title("M*A*S*H"), "mash");
     }
 }

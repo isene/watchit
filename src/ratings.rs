@@ -34,10 +34,17 @@ pub struct Entry {
     pub year: i32,
 }
 
-/// Key for the title fallback: case and punctuation are not signal.
-fn title_key(title: &str, year: i32) -> (String, i32) {
-    let t: String = title.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
-    (t, year)
+/// Key for the title fallback — see `data::normalize_title`.
+fn title_key(title: &str) -> String {
+    crate::data::normalize_title(title)
+}
+
+/// Do these two refer to the same title? A year of 0 means "unknown" —
+/// half this catalog came from an import that carried no years — and a
+/// series is filed under its first-air year on one side and its release
+/// year on the other often enough to allow a year of slack.
+fn same_title(a: i32, b: i32) -> bool {
+    a == 0 || b == 0 || (a - b).abs() <= 1
 }
 
 pub type Map = HashMap<String, Entry>;
@@ -45,9 +52,11 @@ pub type Map = HashMap<String, Entry>;
 #[derive(Default)]
 pub struct Ratings {
     map: Map,
-    /// Title+year → id, so a rating made under the other end's id scheme
-    /// still finds its title here. Rebuilt whenever `map` changes.
-    by_title: HashMap<(String, i32), String>,
+    /// Normalised title → the ids rated under it, so a rating made under
+    /// the other end's id scheme still finds its title here. A title can
+    /// hold more than one id — a remake, or the same show imported twice
+    /// — so the year picks between them. Rebuilt whenever `map` changes.
+    by_title: HashMap<String, Vec<String>>,
     mine: PathBuf,
 }
 
@@ -109,8 +118,18 @@ impl Ratings {
         self.by_title.clear();
         for (id, e) in &self.map {
             if e.title.is_empty() { continue; }
-            self.by_title.insert(title_key(&e.title, e.year), id.clone());
+            self.by_title.entry(title_key(&e.title)).or_default().push(id.clone());
         }
+    }
+
+    /// The id rated under this title, if any. Prefers an exact year, then
+    /// anything close enough to be the same thing.
+    fn id_by_title(&self, title: &str, year: i32) -> Option<&String> {
+        let ids = self.by_title.get(&title_key(title))?;
+        ids.iter()
+            .find(|id| self.map.get(*id).map(|e| e.year == year).unwrap_or(false))
+            .or_else(|| ids.iter()
+                .find(|id| self.map.get(*id).map(|e| same_title(e.year, year)).unwrap_or(false)))
     }
 
     /// My score for a title, or None when unrated. Falls back to the
@@ -120,7 +139,7 @@ impl Ratings {
         if let Some(e) = self.map.get(id) {
             return Some(e.score).filter(|s| *s > 0);
         }
-        let other = self.by_title.get(&title_key(title, year))?;
+        let other = self.id_by_title(title, year)?;
         self.map.get(other).map(|e| e.score).filter(|s| *s > 0)
     }
 
@@ -130,7 +149,7 @@ impl Ratings {
     pub fn set(&mut self, id: &str, title: &str, year: i32, score: u8) {
         let key = match self.map.contains_key(id) {
             true => id.to_string(),
-            false => self.by_title.get(&title_key(title, year)).cloned()
+            false => self.id_by_title(title, year).cloned()
                 .unwrap_or_else(|| id.to_string()),
         };
         self.map.insert(key, Entry {
@@ -197,6 +216,25 @@ mod tests {
         src.insert("tt1".into(), e(0, 200, "A", 1990));
         merge_into(&mut dst, src);
         assert_eq!(dst["tt1"].score, 0);
+    }
+
+    #[test]
+    fn a_missing_year_still_matches_the_title() {
+        // Half this catalog came from an import that carried no years, so
+        // insisting on an exact year match means the imported copy of a
+        // show never shows the rating given to its TMDB-keyed twin.
+        let dir = std::env::temp_dir().join(format!("watchit-noyear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut m: Map = HashMap::new();
+        m.insert("71914".into(), e(8, 100, "The Wheel of Time", 2021));
+        std::fs::write(dir.join("ratings-x.json"), serde_json::to_string(&m).unwrap()).unwrap();
+
+        let r = Ratings::load(&dir);
+        assert_eq!(r.get("tt7462410", "The Wheel of Time", 0), Some(8), "year 0 = unknown");
+        assert_eq!(r.get("tt7462410", "The Wheel of Time", 2022), Some(8), "a year of slack");
+        assert_eq!(r.get("tt0000001", "Something Else", 0), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

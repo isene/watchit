@@ -322,7 +322,9 @@ impl App {
         } else {
             self.cfg.dump_series.iter().collect()
         };
-        let mut ids: Vec<(String, f64, String)> = source.iter()
+        // (id, TMDB rating, title, year) — the year is carried because the
+        // rating lookup needs it to tell a title from its remake.
+        let mut ids: Vec<(String, f64, String, i32)> = source.iter()
             .filter(|it| !dump_set.contains(&it.id))
             .filter(|it| self.only_rated
                 || it.rating >= self.cfg.rating_min)
@@ -331,19 +333,19 @@ impl App {
             .filter(|it| self.cfg.year_min == 0 || self.item_year(it) >= self.cfg.year_min)
             .filter(|it| self.cfg.year_max == 0 || self.item_year(it) <= self.cfg.year_max)
             .filter(|it| self.matches_genres(it))
-            .map(|it| (it.id.clone(), it.rating, it.title.clone()))
+            .map(|it| (it.id.clone(), it.rating, it.title.clone(), self.item_year(it)))
             .collect();
         match self.cfg.sort.as_str() {
             "alpha" => ids.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase())),
             // My own score first, unrated last, TMDB rating breaking ties.
             "mine" => ids.sort_by(|a, b| {
-                let (ma, mb) = (self.ratings.get(&a.0, &a.2, 0).unwrap_or(0),
-                                self.ratings.get(&b.0, &b.2, 0).unwrap_or(0));
+                let (ma, mb) = (self.ratings.get(&a.0, &a.2, a.3).unwrap_or(0),
+                                self.ratings.get(&b.0, &b.2, b.3).unwrap_or(0));
                 mb.cmp(&ma).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
             }),
             _ => ids.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)),
         }
-        self.filtered = ids.into_iter().map(|(i, _, _)| i).collect();
+        self.filtered = ids.into_iter().map(|(i, _, _, _)| i).collect();
         if self.list_idx >= self.filtered.len() {
             self.list_idx = self.filtered.len().saturating_sub(1);
         }
@@ -1013,14 +1015,44 @@ impl App {
         self.scrape_rx = Some(rx);
     }
 
+    /// Collapse duplicates — by id, and by title.
+    ///
+    /// The same show can sit in the list twice under two ids: once from
+    /// the old IMDB import (`tt7462410`, no year) and once from TMDB
+    /// (`71914`, 2021). Only one of them carries a rating, so the other
+    /// looks like a title that refuses to sort. The TMDB-keyed row wins
+    /// — it is the one details, posters and the phone all agree on.
     fn remove_duplicates(&mut self) {
+        let before = self.db.movies.len() + self.db.series.len();
         let mut seen: HashSet<String> = HashSet::new();
         self.db.movies.retain(|it| seen.insert(it.id.clone()));
         seen.clear();
         self.db.series.retain(|it| seen.insert(it.id.clone()));
+
+        let norm = data::normalize_title;
+        for list in [&mut self.db.movies, &mut self.db.series] {
+            // A legacy id starts with "tt"; anything else came from TMDB.
+            // Keeping the TMDB row means sorting those to the front and
+            // letting the first of each title win.
+            list.sort_by_key(|it| it.id.starts_with("tt"));
+            // Same title is NOT enough: there are four different films
+            // called "Travellers". Only collapse rows whose years agree,
+            // or where one side has no year at all — which is exactly the
+            // shape of an import row and its TMDB twin.
+            let mut kept: Vec<(String, i32)> = Vec::new();
+            list.retain(|it| {
+                let key = norm(&it.title);
+                let dup = kept.iter().any(|(t, y)| {
+                    *t == key && (*y == it.year || *y == 0 || it.year == 0)
+                });
+                if dup { false } else { kept.push((key, it.year)); true }
+            });
+        }
         self.db.save(&config::list_path());
+        self.rebuild_genres();
         self.rebuild_filtered();
-        self.footer_say(" Duplicates removed", 46);
+        let gone = before - (self.db.movies.len() + self.db.series.len());
+        self.footer_say(&format!(" Removed {} duplicate(s)", gone), 46);
     }
 
     // --- Async scrape/fetch ---
@@ -1509,10 +1541,8 @@ impl App {
     /// text, so a title match is all there is to go on until it has been
     /// looked up.
     fn find_by_title(&self, title: &str, year: i32) -> Option<&ListItem> {
-        let norm = |s: &str| -> String {
-            s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
-        };
-        let want = norm(title);
+        let want = data::normalize_title(title);
+        let norm = data::normalize_title;
         self.db.movies.iter().chain(self.db.series.iter())
             .find(|it| norm(&it.title) == want && (year == 0 || it.year == 0 || (it.year - year).abs() <= 1))
     }
