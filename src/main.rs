@@ -295,7 +295,10 @@ impl App {
             if has != want { bad.push(id.clone()); }
         }
         if bad.is_empty() { return; }
-        for id in &bad { self.details.remove(id); }
+        for id in &bad {
+            self.details.remove(id);
+            self.drop_cached_poster(id);
+        }
         data::save_details_cache(&config::details_path(), &self.details);
     }
 
@@ -615,12 +618,16 @@ impl App {
         if !display.supported() { return; }
         let top = 15u16;
         let img_x = self.detail.x;
-        let img_y = self.detail.y + top;
         // Cap it. Unbounded, the box was the whole detail pane, and on a
         // tall terminal that is a poster the size of the screen with the
         // plot squeezed above it. A poster reads fine at postcard size.
         let img_w = self.detail.w.saturating_sub(2).min(34);
         let img_h = self.detail.h.saturating_sub(top + 1).min(24);
+        // Hang it from the BOTTOM of the pane so its lower edge meets the
+        // status line. Anchored at the top it left a band of empty pane
+        // underneath, which reads as a rendering accident.
+        let img_y = (self.detail.y + self.detail.h).saturating_sub(img_h)
+            .max(self.detail.y + top);
         if img_h < 4 { return; }
         self.image_display = Some(display);
         if let Some(ref mut disp) = self.image_display {
@@ -1073,8 +1080,21 @@ impl App {
         self.detail_rx = Some(rx);
     }
 
+    /// Forget a title's cached poster image. The next render downloads it
+    /// again from whatever URL the details now carry.
+    fn drop_cached_poster(&mut self, id: &str) {
+        let _ = std::fs::remove_file(config::data_dir().join(format!("{}.jpg", id)));
+        if self.current_poster.as_deref() == Some(id) {
+            self.clear_poster();
+        }
+    }
+
     fn refetch_current(&mut self) {
         let Some(id) = self.current_id() else { return };
+        // `f` means "this is wrong, get it again", and that has to include
+        // the picture — the details may come back byte-identical while the
+        // cached image is the one that was wrong.
+        self.drop_cached_poster(&id);
         self.footer_say(&format!(" Re-fetching {}...", id), 226);
         self.render_footer();
         let (tx, rx) = mpsc::channel();
@@ -1158,6 +1178,14 @@ impl App {
                                 if it.genres.is_empty() { it.genres = d.genres.clone(); }
                             }
                         }
+                        // A poster is cached under the title's id, so a
+                        // title whose poster URL changed - or whose old
+                        // details were the wrong film entirely - would go
+                        // on showing the previous image forever.
+                        let stale = self.details.get(&d.id)
+                            .map(|old| old.poster_url != d.poster_url)
+                            .unwrap_or(true);
+                        if stale { self.drop_cached_poster(&d.id); }
                         self.details.insert(d.id.clone(), d);
                         changed = true;
                     }
