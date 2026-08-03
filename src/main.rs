@@ -194,6 +194,10 @@ struct App {
     /// How many titles the last start took from the other device, so the
     /// footer can mention it once the panes are up.
     shared_note: Option<usize>,
+    /// Details fetched since the cache was last written. Lives across
+    /// drains — a single drain pass sees only the handful that landed in
+    /// the last tick, so a per-pass counter would never reach a batch.
+    details_since_save: usize,
     /// An id migration in flight (IMDB tconsts → TMDB ids).
     migrate_rx: Option<mpsc::Receiver<Result<Migration, String>>>,
 }
@@ -232,6 +236,7 @@ impl App {
             ratings: ratings::Ratings::default(),
             recs_rx: None,
             shared_note: None,
+            details_since_save: 0,
             migrate_rx: None,
         }
     }
@@ -990,30 +995,62 @@ impl App {
     /// Check every title in the database and queue a re-fetch for any whose
     /// details are missing or marked error. Same pattern as `i` but scans
     /// the full list, not just the current filtered view.
-    fn verify_data(&mut self) {
-        let mut missing = Vec::new();
-        for it in self.db.movies.iter().chain(self.db.series.iter()) {
-            let needs = self.details.get(&it.id)
-                .map(|d| d.error || d.title.is_empty())
-                .unwrap_or(true);
-            if needs { missing.push((it.id.clone(), self.kind_of(&it.id))); }
-            if missing.len() >= 20 { break; }
+    /// Does this title still owe us a details fetch?
+    ///
+    /// A poster URL counts. The old IMDB import filled in plots and cast
+    /// but no posters, so those rows look complete while carrying nothing
+    /// the phone can show a thumbnail from — this app draws its posters
+    /// from its own disk cache and never noticed.
+    fn needs_details(&self, id: &str) -> bool {
+        match self.details.get(id) {
+            None => true,
+            Some(d) => d.error || d.title.is_empty() || d.poster_url.is_empty(),
         }
-        if missing.is_empty() {
-            self.footer_say(" All details valid", 46);
+    }
+
+    /// Fetch everything still missing, in one parallel sweep.
+    ///
+    /// This used to take the first twenty and stop, which on a few
+    /// hundred stale rows is a ritual of pressing a key and waiting.
+    /// Same worker pool as the id migration: one HTTPS round trip per
+    /// title and nothing else.
+    fn verify_data(&mut self) {
+        if self.detail_rx.is_some() {
+            self.footer_say(" Fetch already running", 226);
             return;
         }
-        self.footer_say(&format!(" Verifying {} missing/stale...", missing.len()), 226);
+        if self.cfg.tmdb_key.is_empty() {
+            self.footer_say(" Fetching needs a TMDB key — press K", 196);
+            return;
+        }
+        let missing: Vec<(String, Option<String>)> = self.db.movies.iter()
+            .chain(self.db.series.iter())
+            .filter(|it| self.needs_details(&it.id))
+            .map(|it| (it.id.clone(), self.kind_of(&it.id)))
+            .collect();
+        if missing.is_empty() {
+            self.footer_say(" Every title has its details", 46);
+            return;
+        }
+        self.footer_say(&format!(" Fetching details for {} titles…", missing.len()), 81);
         self.render_footer();
         let (tx, rx) = mpsc::channel();
         let key = self.cfg.tmdb_key.clone();
         let region = self.cfg.region.clone();
-        std::thread::spawn(move || {
-            for (id, kind) in missing {
-                let d = scrape::fetch_details_keyed(&id, kind.as_deref(), &region, &key);
-                let _ = tx.send(d);
-            }
-        });
+        const WORKERS: usize = 6;
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(missing));
+        for _ in 0..WORKERS {
+            let tx = tx.clone();
+            let key = key.clone();
+            let region = region.clone();
+            let queue = queue.clone();
+            std::thread::spawn(move || loop {
+                let Some((id, kind)) = queue.lock().ok().and_then(|mut q| q.pop()) else { break };
+                let _ = tx.send(scrape::fetch_details_keyed(&id, kind.as_deref(), &region, &key));
+            });
+        }
+        // The receiver only reports "finished" once every sender is gone.
+        drop(tx);
         self.detail_rx = Some(rx);
     }
 
@@ -1212,7 +1249,7 @@ impl App {
         }
         // Find first title without details and fetch it in the background.
         let missing: Vec<(String, Option<String>)> = self.filtered.iter()
-            .filter(|id| self.details.get(id.as_str()).map(|d| d.error || d.title.is_empty()).unwrap_or(true))
+            .filter(|id| self.needs_details(id))
             .take(5)
             .map(|id| (id.clone(), self.kind_of(id)))
             .collect();
@@ -1377,15 +1414,38 @@ impl App {
                             .unwrap_or(true);
                         if stale { self.drop_cached_poster(&d.id); }
                         self.details.insert(d.id.clone(), d);
+                        self.details_since_save += 1;
                         changed = true;
                     }
-                    Err(mpsc::TryRecvError::Empty) => { self.detail_rx = Some(rx); break; }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        // Save as we go. A sweep over a few hundred titles
+                        // that only wrote at the end lost the lot if it was
+                        // interrupted — and the whole point of the sweep is
+                        // that it is long.
+                        if self.details_since_save >= 50 {
+                            data::save_details_cache(&config::details_path(), &self.details);
+                            let left = self.db.movies.iter().chain(self.db.series.iter())
+                                .filter(|it| self.needs_details(&it.id)).count();
+                            self.footer_say(&format!(" Fetching details… {} left", left), 81);
+                            self.details_since_save = 0;
+                        }
+                        self.detail_rx = Some(rx);
+                        break;
+                    }
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        self.details_since_save = 0;
                         data::save_details_cache(&config::details_path(), &self.details);
-                        self.db.save(&config::list_path());
+                        self.save_catalog();
                         self.rebuild_genres();
                         self.rebuild_filtered();
-                        self.footer_say(" Details fetched", 46);
+                        let left = self.db.movies.iter().chain(self.db.series.iter())
+                            .filter(|it| self.needs_details(&it.id)).count();
+                        if left == 0 {
+                            self.footer_say(" Details fetched", 46);
+                        } else {
+                            self.footer_say(&format!(
+                                " Details fetched \u{b7} {} title(s) TMDB has no poster for", left), 46);
+                        }
                         break;
                     }
                 }
@@ -1971,7 +2031,7 @@ impl App {
   I              Full fetch of top-rated lists (background)
   i              Incremental fetch of missing details
   f              Re-fetch current item
-  v              Verify data (fetch first 20 missing)
+  v              Fetch every missing detail and poster (parallel sweep)
   L              Load additional lists (popular movies + TV)
   D              Remove duplicate entries
   M              Migrate old IMDB ids to TMDB ids (one-off, ~4 min)

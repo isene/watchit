@@ -92,7 +92,7 @@ a rating made on the phone never reaches the imported row.
 - **Wish and dump lists** separate for movies and series
 - **Multi-search** (`/`) across TMDB movies and TV: pick from the hits with the highlighted one's description under the list, filed by what it actually is
 - **Background threads** for fetch — UI never blocks
-- **Verify (`v`)** — fetch missing details; **Refetch (`f`)** — re-pull current item
+- **Fetch all missing (`v`)** — one parallel sweep for every detail and poster still absent; **Refetch (`f`)** — re-pull current item
 - **Duplicate removal (`D`)** across all lists
 
 ## Keys
@@ -120,7 +120,7 @@ a rating made on the phone never reaches the imported row.
 | `I` | Fetch top-rated movies + TV (background) |
 | `i` | Incremental fetch of missing details |
 | `f` | Re-fetch current item |
-| `v` | Verify data integrity |
+| `v` | Fetch every missing detail and poster in one parallel sweep |
 | `L` | Load popular movies + TV (background, no duplicates) |
 | `D` | Remove duplicates — same id, and the same title imported twice |
 | `M` | Migrate legacy IMDB ids to TMDB ids (one-off) |
