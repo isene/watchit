@@ -77,12 +77,37 @@ fn device() -> String {
     if name.is_empty() { "desktop".to_string() } else { name }
 }
 
-/// Merge `src` into `dst`, newest timestamp per title wins.
+/// Merge `src` into `dst`: newest timestamp wins, per id AND per title.
+///
+/// Id alone is not enough. A device that has not synced since this
+/// catalog migrated off IMDB ids still holds its ratings under tconsts,
+/// and merging by id would file those beside their TMDB twins — two
+/// entries for one film, and the old scheme resurrected in the file we
+/// write back. Fold them together instead. On a tie the TMDB-keyed id
+/// wins, since that is the direction everything is moving.
 pub fn merge_into(dst: &mut Map, src: Map) {
     for (id, e) in src {
-        match dst.get(&id) {
-            Some(old) if old.ts >= e.ts => {}
-            _ => { dst.insert(id, e); }
+        // The id this title already lives under here, if any.
+        let existing = if dst.contains_key(&id) {
+            Some(id.clone())
+        } else {
+            dst.iter()
+                .filter(|(_, o)| !o.title.is_empty() && title_key(&o.title) == title_key(&e.title))
+                .find(|(_, o)| o.year == e.year || same_title(o.year, e.year))
+                .map(|(k, _)| k.clone())
+        };
+        match existing {
+            None => { dst.insert(id, e); }
+            Some(key) => {
+                let old = &dst[&key];
+                let newer = e.ts > old.ts
+                    || (e.ts == old.ts && key.starts_with("tt") && !id.starts_with("tt"));
+                if !newer { continue; }
+                // Keep one entry, under the better id.
+                let winner = if key.starts_with("tt") && !id.starts_with("tt") { id } else { key.clone() };
+                dst.remove(&key);
+                dst.insert(winner, e);
+            }
         }
     }
 }
@@ -235,6 +260,27 @@ mod tests {
         src.insert("tt1".into(), e(0, 200, "A", 1990));
         merge_into(&mut dst, src);
         assert_eq!(dst["tt1"].score, 0);
+    }
+
+    #[test]
+    fn a_stale_device_does_not_resurrect_the_old_ids() {
+        // The phone last synced before the catalog migrated, so its file
+        // still keys everything by tconst. Merging those in must fold
+        // them into their TMDB twins, not double the list.
+        let mut dst: Map = HashMap::new();
+        dst.insert("94605".into(), e(9, 500, "Arcane: League of Legends", 2021));
+        let mut src: Map = HashMap::new();
+        src.insert("tt11126994".into(), e(9, 500, "Arcane: League of Legends", 2021));
+        merge_into(&mut dst, src);
+        assert_eq!(dst.len(), 1, "one film, one entry");
+        assert!(dst.contains_key("94605"), "kept under the TMDB id");
+
+        // But a genuinely newer rating from that device still wins.
+        let mut src2: Map = HashMap::new();
+        src2.insert("tt11126994".into(), e(6, 900, "Arcane: League of Legends", 2021));
+        merge_into(&mut dst, src2);
+        assert_eq!(dst.len(), 1);
+        assert_eq!(dst["94605"].score, 6);
     }
 
     #[test]
