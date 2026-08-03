@@ -113,6 +113,7 @@ fn main() {
             "K" => { app.set_tmdb_key(); app.render_all(); }
             "R" => { app.set_region(); app.render_all(); }
             "D" => { app.remove_duplicates(); app.render_all(); }
+            "M" => { app.migrate_ids(); }
             "v" => { app.verify_data(); app.render_all(); }
             "L" => { app.load_additional_lists(); app.render_all(); }
             "W" => { app.cfg.save(); app.footer_say(" Config saved", 46); }
@@ -184,12 +185,17 @@ struct App {
     /// A `claude -p` recommendation in flight. The TUI stays live while
     /// it runs; the answer opens in a popup when it lands.
     recs_rx: Option<mpsc::Receiver<Result<String, String>>>,
+    /// An id migration in flight (IMDB tconsts → TMDB ids).
+    migrate_rx: Option<mpsc::Receiver<Result<Migration, String>>>,
 }
 
 enum ScrapeResult {
     Full(Vec<ListItem>, Vec<ListItem>),
     Progress(String),
 }
+
+/// One legacy row resolved to its TMDB record: (old IMDB id, new row).
+type Migration = (String, ListItem);
 
 impl App {
     fn new(cfg: Config) -> Self {
@@ -216,6 +222,7 @@ impl App {
             poster_rx: None,
             ratings: ratings::Ratings::default(),
             recs_rx: None,
+            migrate_rx: None,
         }
     }
 
@@ -1015,6 +1022,93 @@ impl App {
         self.scrape_rx = Some(rx);
     }
 
+    /// Move the catalog off IMDB ids and onto TMDB ones.
+    ///
+    /// A catalog imported from IMDB-terminal is keyed by tconst while
+    /// everything else here — details, posters, the phone — is keyed by
+    /// TMDB id. Every cross-reference then rests on matching titles, and
+    /// titles disagree: TMDB calls it "Arcane", the import called it
+    /// "Arcane: League of Legends", so a rating made on one never reaches
+    /// the other. TMDB's /find endpoint speaks both id spaces, so this is
+    /// fixable exactly rather than by guessing.
+    ///
+    /// Everything keyed by the old id follows: the details cache, the
+    /// cached poster, wish and dump, and the rating.
+    fn migrate_ids(&mut self) {
+        if self.migrate_rx.is_some() {
+            self.footer_say(" Migration already running", 226);
+            return;
+        }
+        if self.cfg.tmdb_key.is_empty() {
+            self.footer_say(" Migration needs a TMDB key — press K", 196);
+            return;
+        }
+        let legacy: Vec<String> = self.db.movies.iter().chain(self.db.series.iter())
+            .filter(|it| it.id.starts_with("tt"))
+            .map(|it| it.id.clone())
+            .collect();
+        if legacy.is_empty() {
+            self.footer_say(" Nothing to migrate — every title is already TMDB-keyed", 46);
+            return;
+        }
+        self.footer_say(&format!(" Migrating {} titles to TMDB ids — this takes a minute", legacy.len()), 81);
+        let (tx, rx) = mpsc::channel();
+        let key = self.cfg.tmdb_key.clone();
+        // Six workers. The cost is one HTTPS round trip per title and
+        // nothing else, so sequentially a 661-title catalog takes twenty
+        // minutes and in parallel about three. TMDB's rate limit is far
+        // above this.
+        const WORKERS: usize = 6;
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(legacy));
+        for _ in 0..WORKERS {
+            let tx = tx.clone();
+            let key = key.clone();
+            let queue = queue.clone();
+            std::thread::spawn(move || loop {
+                let Some(old) = queue.lock().ok().and_then(|mut q| q.pop()) else { break };
+                match scrape::resolve_imdb_id(&old, &key) {
+                    Some(item) => { let _ = tx.send(Ok((old, item))); }
+                    None => { let _ = tx.send(Err(old)); }
+                }
+            });
+        }
+        // The receiver only reports "finished" once every sender is gone.
+        drop(tx);
+        self.migrate_rx = Some(rx);
+    }
+
+    /// Apply one resolved row. Called as results arrive.
+    fn apply_migration(&mut self, old: &str, new: &ListItem) {
+        let is_series = self.db.series.iter().any(|it| it.id == old);
+        let list = if is_series { &mut self.db.series } else { &mut self.db.movies };
+        let Some(item) = list.iter_mut().find(|it| it.id == old) else { return };
+        // Keep the title we already show; TMDB's is often the shorter one
+        // and there is no reason to churn the list under the cursor. The
+        // id, kind, year and score are what we came for.
+        if item.year == 0 { item.year = new.year; }
+        if new.rating > 0.0 { item.rating = new.rating; }
+        item.kind = new.kind.clone();
+        item.id = new.id.clone();
+        let title = item.title.clone();
+        let year = item.year;
+
+        // Everything else keyed by the old id follows it.
+        if let Some(mut d) = self.details.remove(old) {
+            d.id = new.id.clone();
+            self.details.entry(new.id.clone()).or_insert(d);
+        }
+        let dir = config::data_dir();
+        let (from, to) = (dir.join(format!("{}.jpg", old)), dir.join(format!("{}.jpg", new.id)));
+        if from.exists() && !to.exists() { let _ = std::fs::rename(&from, &to); }
+        for lst in [&mut self.cfg.wish_movies, &mut self.cfg.wish_series,
+                    &mut self.cfg.dump_movies, &mut self.cfg.dump_series] {
+            for entry in lst.iter_mut() {
+                if entry == old { *entry = new.id.clone(); }
+            }
+        }
+        self.ratings.rekey(old, &new.id, &title, year);
+    }
+
     /// Collapse duplicates — by id, and by title.
     ///
     /// The same show can sit in the list twice under two ids: once from
@@ -1195,6 +1289,41 @@ impl App {
                 }
                 Err(mpsc::TryRecvError::Empty) => { self.scrape_rx = Some(rx); }
                 Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+        if let Some(rx) = self.migrate_rx.take() {
+            let mut done = 0usize;
+            let mut failed = 0usize;
+            let mut finished = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(Ok((old, item))) => { self.apply_migration(&old, &item); done += 1; }
+                    Ok(Err(_)) => { failed += 1; }
+                    Err(mpsc::TryRecvError::Empty) => { self.migrate_rx = Some(rx); break; }
+                    Err(mpsc::TryRecvError::Disconnected) => { finished = true; break; }
+                }
+            }
+            if done > 0 || failed > 0 {
+                // list.json every batch: it is small, and it is what makes
+                // an interrupted migration resume instead of restart.
+                // details.json is half a megabyte, so it waits for the end.
+                self.db.save(&config::list_path());
+                self.cfg.save();
+                let left = self.db.movies.iter().chain(self.db.series.iter())
+                    .filter(|it| it.id.starts_with("tt")).count();
+                self.footer_say(&format!(" Migrating… {} left", left), 81);
+                changed = true;
+            }
+            if finished {
+                data::save_details_cache(&config::details_path(), &self.details);
+                // Two rows can now share an id — the imported copy and the
+                // TMDB one it just became. Collapse them.
+                self.remove_duplicates();
+                let left = self.db.movies.iter().chain(self.db.series.iter())
+                    .filter(|it| it.id.starts_with("tt")).count();
+                self.footer_say(&format!(
+                    " Migration done \u{b7} {} title(s) TMDB has no record of, left as they were", left), 46);
+                changed = true;
             }
         }
         if let Some(rx) = self.detail_rx.take() {
@@ -1809,6 +1938,7 @@ impl App {
   v              Verify data (fetch first 20 missing)
   L              Load additional lists (popular movies + TV)
   D              Remove duplicate entries
+  M              Migrate old IMDB ids to TMDB ids (one-off, ~4 min)
   K              Set TMDB API key (required — see README)
   R              Set streaming region
   W              Save config now

@@ -890,7 +890,7 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "watchit"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "fe2o3-crust",
  "fe2o3-glow",

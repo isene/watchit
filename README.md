@@ -63,10 +63,17 @@ gem, watchit auto-imports its config and cached posters:
 - `~/.imdb.yml` → `~/.watchit/config.yml`
 - `~/.imdb/data/list.json`, `details.json`, `tt*.jpg` posters → `~/.watchit/data/`
 
-Note: the imported list/details use IMDB tconst IDs (`tt1234567`),
-which watchit no longer queries against (IMDB now blocks plain
-HTTP). Re-press **I** to refetch with TMDB IDs; the wish/dump
-lists' tconst entries will be stale until re-added via search (`/`).
+The imported rows are keyed by IMDB tconst (`tt1234567`), while everything
+else here — details, posters, the phone app — is keyed by TMDB id. Press
+**`M`** once to fix that for good: TMDB's `/find` endpoint resolves each
+tconst to its TMDB record exactly, and the details cache, the cached poster,
+the wish and dump lists and your rating all follow the title to its new id.
+A few hundred titles take a couple of minutes; it is safe to interrupt and
+re-run, and it only touches rows that are still tconst-keyed.
+
+Without it, cross-referencing rests on matching titles — and titles disagree.
+TMDB calls it "Arcane"; the import called it "Arcane: League of Legends", so
+a rating made on the phone never reaches the imported row.
 
 ## Features
 
@@ -115,7 +122,8 @@ lists' tconst entries will be stale until re-added via search (`/`).
 | `f` | Re-fetch current item |
 | `v` | Verify data integrity |
 | `L` | Load popular movies + TV (background, no duplicates) |
-| `D` | Remove duplicate entries |
+| `D` | Remove duplicates — same id, and the same title imported twice |
+| `M` | Migrate legacy IMDB ids to TMDB ids (one-off) |
 | `K` | Set TMDB v3 API key |
 | `R` | Set streaming region (ISO code) |
 | `W` | Save config now |

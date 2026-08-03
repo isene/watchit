@@ -160,6 +160,25 @@ impl Ratings {
         self.save();
     }
 
+    /// Move a rating from one id to another, keeping its score and its
+    /// timestamp. Used when the catalog migrates a title from its IMDB
+    /// id to its TMDB one: the rating has to follow, or it is orphaned
+    /// under an id nothing refers to any more.
+    pub fn rekey(&mut self, old: &str, new: &str, title: &str, year: i32) {
+        if old == new { return; }
+        let Some(mut e) = self.map.remove(old) else { return };
+        if !title.is_empty() { e.title = title.to_string(); }
+        if year > 0 { e.year = year; }
+        // A rating already on the new id wins only if it is newer.
+        let keep = match self.map.get(new) {
+            Some(existing) if existing.ts >= e.ts => true,
+            _ => false,
+        };
+        if !keep { self.map.insert(new.to_string(), e); }
+        self.reindex();
+        self.save();
+    }
+
     /// Every title I have actually scored, highest first.
     pub fn rated(&self) -> Vec<(String, Entry)> {
         let mut v: Vec<(String, Entry)> = self.map.iter()

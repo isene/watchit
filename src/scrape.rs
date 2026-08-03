@@ -24,12 +24,24 @@ use serde_json::Value as JsonValue;
 const TMDB_BASE: &str = "https://api.themoviedb.org/3";
 const POSTER_BASE: &str = "https://image.tmdb.org/t/p/w500";
 
+/// One agent for the whole process. ureq pools connections per agent,
+/// so building a fresh one per request threw away the TLS handshake
+/// every time — which is most of the cost when the payload is a few
+/// hundred bytes of JSON, and all of the cost when several threads are
+/// fetching at once.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(10))
+            .timeout_read(std::time::Duration::from_secs(20))
+            .max_idle_connections_per_host(8)
+            .build()
+    })
+}
+
 fn http_get(url: &str) -> Option<String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(10))
-        .timeout_read(std::time::Duration::from_secs(20))
-        .build();
-    agent.get(url)
+    agent().get(url)
         .set("Accept", "application/json")
         .call()
         .ok()?
@@ -368,4 +380,46 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+/// Resolve an IMDB tconst to its TMDB record, exactly — no title
+/// guessing. `/find` is the one endpoint that speaks both id spaces,
+/// which is what makes a catalog imported from IMDB-terminal fixable
+/// rather than merely patchable.
+pub fn resolve_imdb_id(tconst: &str, api_key: &str) -> Option<ListItem> {
+    if tconst.is_empty() || api_key.is_empty() { return None; }
+    let url = format!(
+        "{}/find/{}?api_key={}&external_source=imdb_id",
+        TMDB_BASE, tconst, api_key
+    );
+    // Two retries. A migration reports what it could not resolve as
+    // "TMDB has no record of this", and a rate-limit or a dropped
+    // connection must not be allowed to say that about a title TMDB
+    // knows perfectly well.
+    let mut body = http_get(&url);
+    for attempt in 1..=2u32 {
+        if body.is_some() { break; }
+        std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
+        body = http_get(&url);
+    }
+    let body = body?;
+    let v: JsonValue = serde_json::from_str(&body).ok()?;
+    for (key, kind) in [("movie_results", "movie"), ("tv_results", "tv")] {
+        let Some(first) = v.get(key).and_then(|a| a.as_array()).and_then(|a| a.first()) else {
+            continue;
+        };
+        let Some(id) = first.get("id").and_then(|x| x.as_i64()) else { continue };
+        let title_field = if kind == "movie" { "title" } else { "name" };
+        let date_field = if kind == "movie" { "release_date" } else { "first_air_date" };
+        return Some(ListItem {
+            id: id.to_string(),
+            title: first.get(title_field).and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            rating: first.get("vote_average").and_then(|x| x.as_f64()).unwrap_or(0.0),
+            year: first.get(date_field).and_then(|x| x.as_str())
+                .and_then(|s| s.get(..4)).and_then(|s| s.parse().ok()).unwrap_or(0),
+            genres: Vec::new(),
+            kind: kind.to_string(),
+        });
+    }
+    None
 }
