@@ -298,6 +298,7 @@ impl App {
         self.ratings = ratings::Ratings::load(&config::sync_dir());
         // Whatever the phone has added since we last looked.
         let sync = config::sync_dir();
+        self.namespace_series_cache();
         let added = share::merge_others(&sync, &mut self.db);
         if added > 0 {
             self.db.save(&config::list_path());
@@ -342,6 +343,48 @@ impl App {
         data::save_details_cache(&config::details_path(), &self.details);
     }
 
+    /// Move each series' cached data onto its namespaced key.
+    ///
+    /// The id migration keyed everything by bare TMDB id, and those are
+    /// only unique within a kind: movie 745 is The Sixth Sense, tv 745 is
+    /// Spaced. The series inherited the film's details, poster and
+    /// rating. Runs once — after the move the bare key is gone — and
+    /// leaves anything a film genuinely owns alone, so the series simply
+    /// refetches.
+    fn namespace_series_cache(&mut self) {
+        let movie_ids: HashSet<String> = self.db.movies.iter().map(|it| it.id.clone()).collect();
+        let series: Vec<(String, String, String, i32)> = self.db.series.iter()
+            .filter(|it| !it.id.starts_with("tt"))
+            .map(|it| (it.id.clone(), data::cache_key(&it.id, true), it.title.clone(), self.item_year(it)))
+            .collect();
+        let mut moved = 0;
+        for (old, new, title, year) in series {
+            if self.details.contains_key(&new) { continue; }
+            // A details entry the film owns stays with the film.
+            let owned_by_film = self.details.get(&old)
+                .map(|d| d.kind == "Movie" && movie_ids.contains(&old))
+                .unwrap_or(false);
+            if !owned_by_film {
+                if let Some(d) = self.details.remove(&old) {
+                    self.details.insert(new.clone(), d);
+                    moved += 1;
+                }
+                let dir = config::data_dir();
+                let (from, to) = (dir.join(format!("{}.jpg", old)), dir.join(format!("{}.jpg", new)));
+                if from.exists() && !to.exists() { let _ = std::fs::rename(&from, &to); }
+            }
+            // The rating follows only if it is plainly this series' own:
+            // titles are all there is to go on.
+            let same = self.ratings.title_of(&old)
+                .map(|t| data::normalize_title(&t) == data::normalize_title(&title))
+                .unwrap_or(false);
+            if same { self.ratings.rekey(&old, &new, &title, year); }
+        }
+        if moved > 0 {
+            data::save_details_cache(&config::details_path(), &self.details);
+        }
+    }
+
     fn rebuild_genres(&mut self) {
         let mut set: HashSet<String> = HashSet::new();
         for d in self.details.values() {
@@ -364,28 +407,28 @@ impl App {
         };
         // (id, TMDB rating, title, year) — the year is carried because the
         // rating lookup needs it to tell a title from its remake.
-        let mut ids: Vec<(String, f64, String, i32)> = source.iter()
+        let mut ids: Vec<(String, f64, String, i32, String)> = source.iter()
             .filter(|it| !dump_set.contains(&it.id))
             .filter(|it| self.only_rated
                 || it.rating >= self.cfg.rating_min)
             .filter(|it| !self.only_rated
-                || self.ratings.get(&it.id, &it.title, self.item_year(it)).is_some())
+                || self.ratings.get(&Self::key_for(it), &it.title, self.item_year(it)).is_some())
             .filter(|it| self.cfg.year_min == 0 || self.item_year(it) >= self.cfg.year_min)
             .filter(|it| self.cfg.year_max == 0 || self.item_year(it) <= self.cfg.year_max)
             .filter(|it| self.matches_genres(it))
-            .map(|it| (it.id.clone(), it.rating, it.title.clone(), self.item_year(it)))
+            .map(|it| (it.id.clone(), it.rating, it.title.clone(), self.item_year(it), Self::key_for(it)))
             .collect();
         match self.cfg.sort.as_str() {
             "alpha" => ids.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase())),
             // My own score first, unrated last, TMDB rating breaking ties.
             "mine" => ids.sort_by(|a, b| {
-                let (ma, mb) = (self.ratings.get(&a.0, &a.2, a.3).unwrap_or(0),
-                                self.ratings.get(&b.0, &b.2, b.3).unwrap_or(0));
+                let (ma, mb) = (self.ratings.get(&a.4, &a.2, a.3).unwrap_or(0),
+                                self.ratings.get(&b.4, &b.2, b.3).unwrap_or(0));
                 mb.cmp(&ma).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
             }),
             _ => ids.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)),
         }
-        self.filtered = ids.into_iter().map(|(i, _, _, _)| i).collect();
+        self.filtered = ids.into_iter().map(|(i, _, _, _, _)| i).collect();
         if self.list_idx >= self.filtered.len() {
             self.list_idx = self.filtered.len().saturating_sub(1);
         }
@@ -393,13 +436,13 @@ impl App {
 
     fn item_year(&self, it: &ListItem) -> i32 {
         if it.year > 0 { return it.year; }
-        self.details.get(&it.id).map(|d| d.year).unwrap_or(0)
+        self.details.get(&Self::key_for(it)).map(|d| d.year).unwrap_or(0)
     }
 
     fn matches_genres(&self, it: &ListItem) -> bool {
         let genres: Vec<&String> = if !it.genres.is_empty() {
             it.genres.iter().collect()
-        } else if let Some(d) = self.details.get(&it.id) {
+        } else if let Some(d) = self.details.get(&Self::key_for(it)) {
             d.genres.iter().collect()
         } else {
             Vec::new()
@@ -479,7 +522,7 @@ impl App {
             let marker = if focused { "\u{2192} " } else { "  " };
             // My score next to the crowd's, padded to a fixed 3 columns
             // BEFORE colouring — SGR bytes would break the alignment.
-            let mine = match self.ratings.get(id, &title, year) {
+            let mine = match self.ratings.get(&self.key_of(id), &title, year) {
                 Some(s) => style::fg(&format!("{:>3}", format!("\u{2605}{}", s)), 214),
                 None => "   ".to_string(),
             };
@@ -551,7 +594,8 @@ impl App {
             return;
         };
         let item = self.list_lookup(&id).cloned();
-        let det = self.details.get(&id).cloned();
+        let ckey = self.key_of(&id);
+        let det = self.details.get(&ckey).cloned();
 
         let mut lines = Vec::new();
         let title = det.as_ref().map(|d| d.title.clone())
@@ -591,7 +635,7 @@ impl App {
         // My own score sits above TMDB's, and says so when it is missing
         // — an empty line here would read as "rated 0".
         let seen_year = self.seen_of(&id, None).map(|s| s.year).unwrap_or(0);
-        let mine = match self.ratings.get(&id, &title, seen_year) {
+        let mine = match self.ratings.get(&ckey, &title, seen_year) {
             Some(s) => style::bold(&style::fg(&format!("My rating: {}/10", s), 214)),
             None => style::fg("My rating: – (press 1-9, 0 for 10)", 240),
         };
@@ -637,11 +681,11 @@ impl App {
         // Poster: prefer the local cached JPG (imports + previous downloads).
         // Fall back to downloading from poster_url if only that's available.
         if self.cfg.show_posters {
-            let local = config::data_dir().join(format!("{}.jpg", id));
+            let local = config::data_dir().join(format!("{}.jpg", ckey));
             if local.exists() {
-                self.show_poster_path(&id, &local);
+                self.show_poster_path(&ckey, &local);
             } else if let Some(url) = det.as_ref().map(|d| d.poster_url.clone()).filter(|s| !s.is_empty()) {
-                self.show_poster(&id, &url);
+                self.show_poster(&ckey, &url);
             } else {
                 self.clear_poster();
             }
@@ -1001,8 +1045,8 @@ impl App {
     /// but no posters, so those rows look complete while carrying nothing
     /// the phone can show a thumbnail from — this app draws its posters
     /// from its own disk cache and never noticed.
-    fn needs_details(&self, id: &str) -> bool {
-        match self.details.get(id) {
+    fn needs_details(&self, it: &ListItem) -> bool {
+        match self.details.get(&Self::key_for(it)) {
             None => true,
             Some(d) => d.error || d.title.is_empty() || d.poster_url.is_empty(),
         }
@@ -1025,7 +1069,7 @@ impl App {
         }
         let missing: Vec<(String, Option<String>)> = self.db.movies.iter()
             .chain(self.db.series.iter())
-            .filter(|it| self.needs_details(&it.id))
+            .filter(|it| self.needs_details(it))
             .map(|it| (it.id.clone(), self.kind_of(&it.id)))
             .collect();
         if missing.is_empty() {
@@ -1158,12 +1202,13 @@ impl App {
         let year = item.year;
 
         // Everything else keyed by the old id follows it.
+        let new_key = data::cache_key(&new.id, is_series);
         if let Some(mut d) = self.details.remove(old) {
             d.id = new.id.clone();
-            self.details.entry(new.id.clone()).or_insert(d);
+            self.details.entry(new_key.clone()).or_insert(d);
         }
         let dir = config::data_dir();
-        let (from, to) = (dir.join(format!("{}.jpg", old)), dir.join(format!("{}.jpg", new.id)));
+        let (from, to) = (dir.join(format!("{}.jpg", old)), dir.join(format!("{}.jpg", new_key)));
         if from.exists() && !to.exists() { let _ = std::fs::rename(&from, &to); }
         for lst in [&mut self.cfg.wish_movies, &mut self.cfg.wish_series,
                     &mut self.cfg.dump_movies, &mut self.cfg.dump_series] {
@@ -1171,7 +1216,7 @@ impl App {
                 if entry == old { *entry = new.id.clone(); }
             }
         }
-        self.ratings.rekey(old, &new.id, &title, year);
+        self.ratings.rekey(old, &new_key, &title, year);
     }
 
     /// Collapse duplicates — by id, and by title.
@@ -1248,10 +1293,16 @@ impl App {
             return;
         }
         // Find first title without details and fetch it in the background.
+        // The current view's rows, so a colliding id resolves the same
+        // way the panes do.
+        let source: &[ListItem] = if self.cfg.view == "movies" { &self.db.movies } else { &self.db.series };
         let missing: Vec<(String, Option<String>)> = self.filtered.iter()
-            .filter(|id| self.needs_details(id))
+            .filter_map(|id| source.iter().find(|it| it.id == *id))
+            .filter(|it| self.needs_details(it))
             .take(5)
-            .map(|id| (id.clone(), self.kind_of(id)))
+            .map(|it| (it.id.clone(), Some(if it.kind.is_empty() {
+                if self.cfg.view == "movies" { "movie".to_string() } else { "tv".to_string() }
+            } else { it.kind.clone() })))
             .collect();
         if missing.is_empty() {
             self.footer_say(" All details present", 46);
@@ -1409,11 +1460,14 @@ impl App {
                         // title whose poster URL changed - or whose old
                         // details were the wrong film entirely - would go
                         // on showing the previous image forever.
-                        let stale = self.details.get(&d.id)
+                        // The record says what it is, so it keys itself:
+                        // movie 745 and tv 745 are different titles.
+                        let ckey = data::cache_key(&d.id, d.kind == "TVSeries");
+                        let stale = self.details.get(&ckey)
                             .map(|old| old.poster_url != d.poster_url)
                             .unwrap_or(true);
-                        if stale { self.drop_cached_poster(&d.id); }
-                        self.details.insert(d.id.clone(), d);
+                        if stale { self.drop_cached_poster(&ckey); }
+                        self.details.insert(ckey, d);
                         self.details_since_save += 1;
                         changed = true;
                     }
@@ -1425,7 +1479,7 @@ impl App {
                         if self.details_since_save >= 50 {
                             data::save_details_cache(&config::details_path(), &self.details);
                             let left = self.db.movies.iter().chain(self.db.series.iter())
-                                .filter(|it| self.needs_details(&it.id)).count();
+                                .filter(|it| self.needs_details(it)).count();
                             self.footer_say(&format!(" Fetching details… {} left", left), 81);
                             self.details_since_save = 0;
                         }
@@ -1439,7 +1493,7 @@ impl App {
                         self.rebuild_genres();
                         self.rebuild_filtered();
                         let left = self.db.movies.iter().chain(self.db.series.iter())
-                            .filter(|it| self.needs_details(&it.id)).count();
+                            .filter(|it| self.needs_details(it)).count();
                         if left == 0 {
                             self.footer_say(" Details fetched", 46);
                         } else {
@@ -1535,7 +1589,7 @@ impl App {
         let is_series = self.db.series.iter().any(|it| it.id == id);
         self.cfg.view = if is_series { "series".into() } else { "movies".into() };
         let mut relaxed: Vec<String> = Vec::new();
-        if self.only_rated && self.ratings.get(id, &item.title, self.item_year(&item)).is_none() {
+        if self.only_rated && self.ratings.get(&self.key_of(id), &item.title, self.item_year(&item)).is_none() {
             self.only_rated = false;
             relaxed.push("left the rated-only view".into());
         }
@@ -1805,6 +1859,22 @@ impl App {
 
     // --- My ratings ---
 
+    /// Cache key for a title in the current view — see `data::cache_key`.
+    /// The panes only ever show rows from one list, so the view settles
+    /// which of a colliding pair (movie 745 vs tv 745) is meant.
+    fn key_of(&self, id: &str) -> String {
+        let is_series = if self.cfg.view == "series" {
+            self.db.series.iter().any(|it| it.id == id)
+        } else {
+            !self.db.movies.iter().any(|it| it.id == id)
+                && self.db.series.iter().any(|it| it.id == id)
+        };
+        data::cache_key(id, is_series)
+    }
+
+    /// Cache key for a row we already hold.
+    fn key_for(it: &ListItem) -> String { data::cache_key(&it.id, it.kind == "tv") }
+
     /// Which TMDB endpoint owns an id, when we know. Movie and tv ids are
     /// SEPARATE spaces — tv/67683 is Travelers, movie/67683 is a 1969
     /// Soviet comedy — so a details fetch that probes movie-then-tv can
@@ -1835,7 +1905,7 @@ impl App {
         }
         // Dropped from the catalog but still rated / wished: the details
         // cache remembers it.
-        self.details.get(id).map(|d| claude::Seen {
+        self.details.get(&self.key_of(id)).map(|d| claude::Seen {
             title: d.title.clone(), year: d.year,
             kind: if d.kind == "TVSeries" { "Series".into() } else { "Movie".into() },
             score,
@@ -1849,7 +1919,7 @@ impl App {
         let seen = self.seen_of(&id, None);
         let title = seen.as_ref().map(|s| s.title.clone()).unwrap_or_else(|| id.clone());
         let year = seen.as_ref().map(|s| s.year).unwrap_or(0);
-        self.ratings.set(&id, &title, year, score);
+        self.ratings.set(&self.key_of(&id), &title, year, score);
         if score == 0 {
             self.footer_say(&format!(" Cleared my rating for {}", title), 244);
         } else {
@@ -1874,7 +1944,7 @@ impl App {
         let ids = |v: &Vec<String>| -> Vec<claude::Seen> {
             v.iter().filter_map(|id| {
                 let seen = self.seen_of(id, None)?;
-                let score = self.ratings.get(id, &seen.title, seen.year);
+                let score = self.ratings.get(&self.key_of(id), &seen.title, seen.year);
                 Some(claude::Seen { score, ..seen })
             }).collect()
         };

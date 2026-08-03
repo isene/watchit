@@ -123,6 +123,23 @@ pub fn normalize_title(title: &str) -> String {
     t.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
+/// Key for anything cached per title: the details entry, the poster
+/// file, the rating.
+///
+/// A TMDB id is NOT unique on its own — movie ids and tv ids are
+/// separate spaces, so 745 is both "The Sixth Sense" and "Spaced". A
+/// catalog holding both then serves one's details, poster and rating to
+/// the other. Series get a `t` prefix; ids are numeric, so nothing else
+/// can look like one. Legacy IMDB ids are left alone — IMDB has a single
+/// space, so `tt0167404` already means one thing.
+pub fn cache_key(id: &str, is_series: bool) -> String {
+    if is_series && !id.starts_with("tt") {
+        format!("t{}", id)
+    } else {
+        id.to_string()
+    }
+}
+
 pub type DetailsCache = HashMap<String, Details>;
 
 pub fn load_details_cache(path: &std::path::Path) -> DetailsCache {
@@ -226,6 +243,16 @@ pub fn save_details_cache(path: &std::path::Path, cache: &DetailsCache) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_series_and_a_film_can_share_a_tmdb_id() {
+        // movie/745 is The Sixth Sense, tv/745 is Spaced.
+        assert_ne!(cache_key("745", true), cache_key("745", false));
+        assert_eq!(cache_key("745", false), "745");
+        assert_eq!(cache_key("745", true), "t745");
+        // IMDB ids are already unambiguous; leave them be.
+        assert_eq!(cache_key("tt0167404", true), "tt0167404");
+    }
 
     #[test]
     fn the_imports_year_range_is_not_part_of_the_title() {

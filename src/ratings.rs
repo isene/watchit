@@ -185,6 +185,13 @@ impl Ratings {
         self.save();
     }
 
+    /// The title a rating was made under, for deciding whether a rating
+    /// keyed by a bare id belongs to the film or to the series that
+    /// shares its number.
+    pub fn title_of(&self, id: &str) -> Option<String> {
+        self.map.get(id).map(|e| e.title.clone()).filter(|t| !t.is_empty())
+    }
+
     /// Move a rating from one id to another, keeping its score and its
     /// timestamp. Used when the catalog migrates a title from its IMDB
     /// id to its TMDB one: the rating has to follow, or it is orphaned
