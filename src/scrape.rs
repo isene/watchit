@@ -90,11 +90,15 @@ pub fn scrape_chart_keyed(chart: &str, limit: usize, api_key: &str) -> Vec<ListI
                 .and_then(|s| s.get(..4))
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
+            let poster_url = r.get("poster_path").and_then(|x| x.as_str())
+                .map(|p| format!("https://image.tmdb.org/t/p/w500{}", p))
+                .unwrap_or_default();
             out.push(ListItem {
                 id: id.to_string(),
                 title, rating, year,
                 genres: Vec::new(),  // genres come on details fetch
                 kind: kind.to_string(),
+                poster_url,
             });
             if out.len() >= limit { return out; }
         }
@@ -357,6 +361,9 @@ pub fn search_keyed(query: &str, max: usize, api_key: &str) -> Vec<SearchHit> {
                     title, rating, year,
                     genres: Vec::new(),
                     kind: mt.to_string(),
+                    poster_url: r.get("poster_path").and_then(|x| x.as_str())
+                        .map(|p| format!("https://image.tmdb.org/t/p/w500{}", p))
+                        .unwrap_or_default(),
                 },
                 overview,
             })
@@ -412,6 +419,9 @@ pub fn resolve_imdb_id(tconst: &str, api_key: &str) -> Option<ListItem> {
         let title_field = if kind == "movie" { "title" } else { "name" };
         let date_field = if kind == "movie" { "release_date" } else { "first_air_date" };
         return Some(ListItem {
+            poster_url: first.get("poster_path").and_then(|x| x.as_str())
+                .map(|p| format!("https://image.tmdb.org/t/p/w500{}", p))
+                .unwrap_or_default(),
             id: id.to_string(),
             title: first.get(title_field).and_then(|x| x.as_str()).unwrap_or("").to_string(),
             rating: first.get("vote_average").and_then(|x| x.as_f64()).unwrap_or(0.0),

@@ -171,18 +171,30 @@ set, pick the region for streaming-availability lookups:
 │   ├── details.json     # Per-title details cache
 │   └── *.jpg            # Poster images (TMDB IDs)
 └── sync/
-    └── ratings-*.json   # My ratings, one file per device (shared with the phone)
+    ├── ratings-*.json   # My ratings, one file per device (shared with the phone)
+    ├── catalog-*.json   # The list itself, one file per device
+    └── tmdb_key.txt     # So the phone never needs the key typed in
 ```
 
-### My ratings, and the phone
+### The phone
 
-Press a digit and the highlighted title carries your score. Ratings live in
+Press a digit and the highlighted title carries your score. Everything shared
+with the [nomad watchit app](https://github.com/isene/nomad) lives in
 `~/.watchit/sync/`, one file per device — share that folder with the
 [nomad watchit app](https://github.com/isene/nomad) over Syncthing and both
 ends see every rating. Each device only ever writes its own file, so there is
 nothing for Syncthing to conflict over; per title, the newest rating wins.
 Clearing a rating is itself a timestamped event, so a clear on one device
 sticks on the other.
+
+The catalog travels the same way, but as a **union**: each device adds titles
+separately and neither ever means "delete what I do not have", so nothing is
+dropped and empty fields (year, genres, poster) are backfilled from whichever
+device did the fetch. It is written when titles are added and once on quit —
+the phone is not watching in real time.
+
+The TMDB key is published here too, so the phone picks it up instead of having
+it typed in on a phone keyboard. A device that already has a key keeps it.
 
 Each rating carries its title and year as well as its id, because the two ends
 do not share an id space — a catalog imported from IMDB-terminal still holds

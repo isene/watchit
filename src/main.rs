@@ -4,6 +4,7 @@ mod data;
 mod import;
 mod ratings;
 mod scrape;
+mod share;
 
 use config::Config;
 use crust::{Crust, Input, Pane, Popup};
@@ -49,7 +50,9 @@ fn main() {
     let mut app = App::new(cfg);
     app.load_all();
 
-    if let Some(msg) = import_msg {
+    if let Some(n) = app.shared_note.take() {
+        app.footer_say(&format!(" {} title(s) picked up from the phone", n), 46);
+    } else if let Some(msg) = import_msg {
         app.footer_say(&format!(" {}", msg), 46);
     } else if app.db.movies.is_empty() && app.db.series.is_empty() {
         if app.cfg.tmdb_key.is_empty() {
@@ -123,6 +126,9 @@ fn main() {
     }
 
     app.cfg.save();
+    // One write per session rather than one per change: the phone is not
+    // watching in real time, and this file is the whole catalog.
+    share::write_mine(&config::sync_dir(), &app.db, &app.details);
     Crust::cleanup();
     Crust::clear_screen();
 }
@@ -185,6 +191,9 @@ struct App {
     /// A `claude -p` recommendation in flight. The TUI stays live while
     /// it runs; the answer opens in a popup when it lands.
     recs_rx: Option<mpsc::Receiver<Result<String, String>>>,
+    /// How many titles the last start took from the other device, so the
+    /// footer can mention it once the panes are up.
+    shared_note: Option<usize>,
     /// An id migration in flight (IMDB tconsts → TMDB ids).
     migrate_rx: Option<mpsc::Receiver<Result<Migration, String>>>,
 }
@@ -222,6 +231,7 @@ impl App {
             poster_rx: None,
             ratings: ratings::Ratings::default(),
             recs_rx: None,
+            shared_note: None,
             migrate_rx: None,
         }
     }
@@ -281,6 +291,24 @@ impl App {
         self.details = data::load_details_cache(&config::details_path());
         self.drop_mismatched_details();
         self.ratings = ratings::Ratings::load(&config::sync_dir());
+        // Whatever the phone has added since we last looked.
+        let sync = config::sync_dir();
+        let added = share::merge_others(&sync, &mut self.db);
+        if added > 0 {
+            self.db.save(&config::list_path());
+            self.shared_note = Some(added);
+        }
+        // A device with no key of its own takes the one already shared;
+        // otherwise it publishes its own for the other end.
+        if self.cfg.tmdb_key.is_empty() {
+            if let Some(key) = share::published_key(&sync) {
+                self.cfg.tmdb_key = key;
+                self.cfg.save();
+            }
+        } else {
+            share::publish_key(&sync, &self.cfg.tmdb_key);
+        }
+        share::write_mine(&sync, &self.db, &self.details);
         self.rebuild_genres();
         self.rebuild_filtered();
     }
@@ -1316,6 +1344,7 @@ impl App {
             }
             if finished {
                 data::save_details_cache(&config::details_path(), &self.details);
+                share::write_mine(&config::sync_dir(), &self.db, &self.details);
                 // Two rows can now share an id — the imported copy and the
                 // TMDB one it just became. Collapse them.
                 self.remove_duplicates();
@@ -1414,7 +1443,7 @@ impl App {
         }
         let list = if is_series { &mut self.db.series } else { &mut self.db.movies };
         list.push(hit.clone());
-        self.db.save(&config::list_path());
+        self.save_catalog();
         // Show it, and fetch its details so the pane has something to say.
         let why = self.reveal(&hit.id);
         self.render_all();
@@ -1424,6 +1453,13 @@ impl App {
         self.refetch_current();
         self.footer_say(&format!(" Added {} to {}{} — fetching details", hit.title,
             if is_series { "Series" } else { "Movies" }, why), 46);
+    }
+
+    /// The catalog changed: persist it, and republish it to the folder
+    /// the phone reads. Called where titles are added, never per render.
+    fn save_catalog(&mut self) {
+        self.db.save(&config::list_path());
+        share::write_mine(&config::sync_dir(), &self.db, &self.details);
     }
 
     /// Put the cursor on a title, whatever it takes, and report what had
@@ -1655,7 +1691,7 @@ impl App {
                 if !wish.contains(&item.id) { wish.push(item.id.clone()); wished += 1; }
             }
         }
-        self.db.save(&config::list_path());
+        self.save_catalog();
         self.cfg.save();
         self.rebuild_genres();
         self.rebuild_filtered();

@@ -16,6 +16,11 @@ pub struct ListItem {
     /// to be open.
     #[serde(default)]
     pub kind: String,
+    /// Poster URL, carried only so a catalog shared with the phone can
+    /// show thumbnails there. This app draws its posters from the
+    /// details cache and leaves this empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub poster_url: String,
 }
 
 /// Per-title extended details. Superset of the Ruby IMDB details format and
