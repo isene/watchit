@@ -635,6 +635,10 @@ impl App {
         // My own score sits above TMDB's, and says so when it is missing
         // — an empty line here would read as "rated 0".
         let seen_year = self.seen_of(&id, None).map(|s| s.year).unwrap_or(0);
+        if det.is_none() && id.starts_with("tt") {
+            lines.push(style::fg(
+                "TMDB has no record under this title's old IMDB id — search (/)                  and add it again to get a TMDB entry.", 246));
+        }
         let mine = match self.ratings.get(&ckey, &title, seen_year) {
             Some(s) => style::bold(&style::fg(&format!("My rating: {}/10", s), 214)),
             None => style::fg("My rating: – (press 1-9, 0 for 10)", 240),
@@ -1046,6 +1050,10 @@ impl App {
     /// the phone can show a thumbnail from — this app draws its posters
     /// from its own disk cache and never noticed.
     fn needs_details(&self, it: &ListItem) -> bool {
+        // A row still carrying an IMDB id cannot be filled: TMDB does not
+        // answer to those, and the migration already tried. Sweeping them
+        // every time would just spend six requests to learn that again.
+        if it.id.starts_with("tt") { return false; }
         match self.details.get(&Self::key_for(it)) {
             None => true,
             Some(d) => d.error || d.title.is_empty() || d.poster_url.is_empty(),
