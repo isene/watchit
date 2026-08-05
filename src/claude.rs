@@ -31,9 +31,15 @@ impl Seen {
     }
 }
 
-/// The taste profile every prompt starts from. Ratings first (that is
-/// the signal), then what I already want to see and what I have thrown
-/// out — both are "do not recommend this" lists as well as evidence.
+/// The taste profile every prompt starts from.
+///
+/// Ratings first — that is the signal. Then the wish list, and last the
+/// titles binned WITHOUT a rating. A binned title that carries a rating
+/// does not belong here at all: it means "seen it, done with it", the
+/// score already says the rest, and listing it as something I dislike
+/// would have the model reading a 9 as evidence against my own taste.
+/// What is left is a refusal sight unseen — a limit on what to offer,
+/// which is a different thing from a low score and has to be said so.
 pub fn taste(rated: &[Seen], wish: &[Seen], dump: &[Seen]) -> String {
     let mut s = String::new();
     s.push_str("Here is my taste in movies and series.\n\nRATED (my own 1-10):\n");
@@ -47,9 +53,16 @@ pub fn taste(rated: &[Seen], wish: &[Seen], dump: &[Seen]) -> String {
         for w in wish { s.push_str(&format!("- {}\n", w.line())); }
     }
     if !dump.is_empty() {
-        s.push_str("\nTHROWN OUT (not interested — do not recommend these, and read them as negative signal):\n");
+        s.push_str(
+            "\nTURNED DOWN WITHOUT WATCHING (I binned these unseen — treat them as \
+             limits on what to offer me, NOT as films I disliked. Generalise \
+             cautiously to the franchise, genre or tone they share, and do not \
+             let them talk you out of something genuinely different):\n");
         for d in dump { s.push_str(&format!("- {}\n", d.line())); }
     }
+    s.push_str(
+        "\nI have seen everything under RATED, including anything I have since \
+         binned — do not recommend any of it back to me.\n");
     s
 }
 

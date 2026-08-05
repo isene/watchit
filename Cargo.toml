@@ -1,6 +1,6 @@
 [package]
 name = "watchit"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2021"
 authors = ["Geir Isene <g@isene.com>"]
 description = "Terminal movie and TV series browser. Rust feature port of IMDB-terminal, built on crust."

@@ -1960,8 +1960,15 @@ impl App {
         wish.extend(ids(&self.cfg.wish_series));
         let mut dump = ids(&self.cfg.dump_movies);
         dump.extend(ids(&self.cfg.dump_series));
-        // The dump list is a bin, not a profile — a few dozen is plenty
-        // of negative signal without swamping the prompt.
+        // A dumped title means one of two opposite things. With a rating
+        // it means "seen it, done with it" — the score already says
+        // everything, and it is listed under RATED. Without one it means
+        // "do not offer me this", which is a limit on what to suggest
+        // rather than a verdict on the film. Only the second is negative
+        // signal; feeding a 9 you happened to bin as evidence against
+        // your own taste is worse than saying nothing.
+        dump.retain(|d| d.score.is_none());
+        // The bin is a bin, not a profile — a few dozen is plenty.
         dump.truncate(60);
         claude::taste(&rated, &wish, &dump)
     }
