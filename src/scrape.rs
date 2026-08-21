@@ -248,8 +248,13 @@ fn parse_details(id: &str, kind: &str, region: &str, v: &JsonValue) -> Details {
     let streaming = if region.is_empty() {
         Vec::new()
     } else {
-        let path = format!("/watch/providers/results/{}", region);
-        let region_data = v.pointer(&path).cloned().unwrap_or(JsonValue::Null);
+        // NOT pointer(): the key is literally `watch/providers`, and a
+        // JSON Pointer reads that slash as a path step, so the lookup
+        // silently missed and every title came back with no providers.
+        let region_data = v.get("watch/providers")
+            .and_then(|w| w.get("results"))
+            .and_then(|r| r.get(region))
+            .cloned().unwrap_or(JsonValue::Null);
         let mut out = Vec::new();
         for bucket in ["flatrate", "free", "ads"] {
             if let Some(arr) = region_data.get(bucket).and_then(|x| x.as_array()) {

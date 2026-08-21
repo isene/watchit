@@ -95,6 +95,7 @@ pub fn genre_label(include: &[String], exclude: &[String]) -> String {
 
 /// One recommendation, parsed back out of the model's answer so it can
 /// be acted on rather than just read.
+#[derive(Clone)]
 pub struct Rec {
     pub title: String,
     pub year: i32,
@@ -165,14 +166,23 @@ pub fn view_rule(view: &str) -> String {
 }
 
 /// Prompt for the one-shot `c` recommendation.
-pub fn recommend_prompt(taste: &str, n: usize, want: &str, genres: &str) -> String {
+pub fn recommend_prompt(taste: &str, n: usize, want: &str, genres: &str, region: &str) -> String {
     let focus = if want.trim().is_empty() {
         String::new()
     } else {
         format!("\n\nWhat I am in the mood for right now: {}", want.trim())
     };
+    // Availability is checked against TMDB afterwards, so this is a nudge
+    // and nothing more. It keeps the list from being mostly titles that
+    // never reached the region, which the check would then throw away.
+    let where_ = if region.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nI watch in {}. Anything I cannot stream there is no use to \
+                 me, so lean towards titles with distribution there.", region.trim())
+    };
     format!(
-        "{taste}{genres}{focus}\n\n\
+        "{taste}{genres}{focus}{where_}\n\n\
          Recommend {n} titles I would probably love, based on what my \
          ratings actually show — the patterns in what I rate high and low, not \
          the obvious crowd-pleasers. Skip anything listed above. Lean towards \
@@ -182,7 +192,7 @@ pub fn recommend_prompt(taste: &str, n: usize, want: &str, genres: &str) -> Stri
          Title (year) — Movie or Series\n\
          One or two sentences on why THIS fits what I rate highly, naming the \
          titles of mine it follows from.\n",
-        taste = taste, genres = genres, focus = focus, n = n
+        taste = taste, genres = genres, focus = focus, where_ = where_, n = n
     )
 }
 
@@ -229,7 +239,33 @@ pub fn ask(prompt: &str) -> Result<String, String> {
         };
         return Err(format!("claude exited: {}", detail));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(strip_ansi(&String::from_utf8_lossy(&out.stdout)).trim().to_string())
+}
+
+/// Drop SGR colour from the CLI's answer. `claude -p` colours its
+/// output even when stdout is a pipe, and the escapes land inside the
+/// parsed title: `Dark \x1b[38;5;51m(2017)` parses as a title of
+/// "Dark \x1b[38;5;51m", which TMDB then cannot find.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' { out.push(c); continue; }
+        // CSI runs to a byte in @..~; anything else ends at the next
+        // letter, which covers the short two-character sequences.
+        match chars.next() {
+            Some('[') => { for c2 in chars.by_ref() { if ('@'..='~').contains(&c2) { break; } } }
+            Some(']') => {
+                // OSC: ends at BEL or ST (ESC \).
+                while let Some(c2) = chars.next() {
+                    if c2 == '\u{7}' { break; }
+                    if c2 == '\u{1b}' { chars.next(); break; }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Is the CLI even installed? Checked before promising an answer.
@@ -270,6 +306,18 @@ mod tests {
         let recs = parse_recs(raw);
         assert_eq!(recs.len(), 1, "the reason line is prose, not a second entry");
         assert!(recs[0].why.contains("cannot cope"));
+    }
+
+    #[test]
+    fn colour_from_the_cli_never_reaches_the_title() {
+        // Exactly what `claude -p` writes down a pipe.
+        let raw = "Dark \u{1b}[38;5;51m(2017)\u{1b}[39m \u{2014} Series\n\
+                   German time-loop thing.\n";
+        let recs = parse_recs(&strip_ansi(raw));
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].title, "Dark");
+        assert_eq!(recs[0].year, 2017);
+        assert_eq!(recs[0].kind, "tv");
     }
 
     #[test]

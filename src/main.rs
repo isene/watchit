@@ -190,7 +190,10 @@ struct App {
     ratings: ratings::Ratings,
     /// A `claude -p` recommendation in flight. The TUI stays live while
     /// it runs; the answer opens in a popup when it lands.
-    recs_rx: Option<mpsc::Receiver<Result<String, String>>>,
+    /// Claude's answer, plus each recommendation resolved against TMDB
+    /// so the picker knows where it streams. `usize` is how many titles
+    /// Claude named, which is more than survive the region check.
+    recs_rx: Option<mpsc::Receiver<Result<(String, usize, Vec<RecHit>), String>>>,
     /// How many titles the last start took from the other device, so the
     /// footer can mention it once the panes are up.
     shared_note: Option<usize>,
@@ -1363,8 +1366,8 @@ impl App {
         let mut changed = false;
         if let Some(rx) = self.recs_rx.take() {
             match rx.try_recv() {
-                Ok(Ok(text)) => {
-                    self.offer_recs(&text);
+                Ok(Ok((text, asked, hits))) => {
+                    self.offer_recs(&text, asked, hits);
                     changed = true;
                 }
                 Ok(Err(e)) => {
@@ -1736,15 +1739,25 @@ impl App {
     /// Nothing is fetched while marking. Each pick costs a TMDB lookup to
     /// turn a title into a real catalog row, and doing that per keypress
     /// would make the picker crawl for titles you then unmark.
-    fn offer_recs(&mut self, text: &str) {
-        let recs = claude::parse_recs(text);
-        if recs.is_empty() {
+    fn offer_recs(&mut self, text: &str, asked: usize, hits: Vec<RecHit>) {
+        if asked == 0 {
             // The model ignored the format. Better to read it than to
             // pretend there is nothing there.
             let head = style::bold(&style::fg("What to watch next", 226));
             self.show_text(&format!("{}\n\n{}", head, text));
             return;
         }
+        // Only what actually streams where I am. A title I cannot play
+        // tonight is not a recommendation.
+        let hits: Vec<RecHit> = hits.into_iter()
+            .filter(|h| !h.providers.is_empty()).collect();
+        if hits.is_empty() {
+            self.footer_say(&format!(
+                " None of Claude's {} picks stream in {} — press c again, or R to change region",
+                asked, self.cfg.region), 226);
+            return;
+        }
+        let recs: Vec<claude::Rec> = hits.iter().map(|h| h.rec.clone()).collect();
 
         const NONE: u8 = 0;
         const LIST: u8 = 1;
@@ -1752,13 +1765,15 @@ impl App {
         let mut marks: Vec<u8> = vec![NONE; recs.len()];
         let mut idx = 0usize;
         let scope = claude::genre_label(&self.cfg.genres_include, &self.cfg.genres_exclude);
+        let dropped = asked.saturating_sub(hits.len());
         let header = format!(
-            "What to watch next{}{}   ENTER: add \u{b7} w: add + wish \u{b7} ESC: done",
-            if scope.is_empty() { "" } else { " \u{2014} " }, scope);
+            "What to watch next{}{} \u{b7} streaming in {}{}   ENTER: add \u{b7} w: add + wish \u{b7} ESC: done",
+            if scope.is_empty() { "" } else { " \u{2014} " }, scope, self.cfg.region,
+            if dropped == 0 { String::new() } else { format!(" ({} not available here)", dropped) });
 
         self.clear_poster();
         loop {
-            let rows: Vec<String> = recs.iter().zip(marks.iter()).map(|(r, m)| {
+            let rows: Vec<String> = recs.iter().zip(marks.iter()).enumerate().map(|(i, (r, m))| {
                 let mark = match *m {
                     LIST => style::fg("[+]", 46),
                     WISH => style::fg("[\u{2665}]", 82),
@@ -1767,17 +1782,20 @@ impl App {
                 let kind = if r.kind == "tv" { "Series" } else { "Movie " };
                 let year = if r.year > 0 { r.year.to_string() } else { "----".into() };
                 let have = if self.find_by_title(&r.title, r.year).is_some() { "\u{2713}" } else { " " };
-                format!("{} {} {}  {}  {}", mark, have, kind, year, r.title)
+                format!("{} {} {}  {}  {}  {}", mark, have, kind, year, r.title,
+                    style::fg(&short_providers(&hits[i].providers), 82))
             }).collect();
-            let infos: Vec<String> = recs.iter().map(|r| {
+            let infos: Vec<String> = recs.iter().enumerate().map(|(i, r)| {
                 let year = if r.year > 0 { r.year.to_string() } else { "year unknown".into() };
                 let kind = if r.kind == "tv" { "Series" } else { "Movie" };
                 let known = match self.find_by_title(&r.title, r.year) {
                     Some(_) => style::fg("\n\nAlready in your list.", 245),
                     None => String::new(),
                 };
-                format!("{}\n{}{}", style::bold(&style::fg(
-                    &format!("{} \u{b7} {} \u{b7} {}", r.title, year, kind), 226)), r.why, known)
+                let plays = style::fg(&format!("\n\nStreaming ({}): {}",
+                    self.cfg.region, hits[i].providers.join(", ")), 82);
+                format!("{}\n{}{}{}", style::bold(&style::fg(
+                    &format!("{} \u{b7} {} \u{b7} {}", r.title, year, kind), 226)), r.why, plays, known)
             }).collect();
 
             match self.pick_from(&header, &rows, &infos, &["ENTER", "w"], idx) {
@@ -1797,11 +1815,11 @@ impl App {
             self.footer_say(" Nothing added", 245);
             return;
         }
-        let (mut added, mut wished, mut missed) = (0usize, 0usize, 0usize);
+        let (mut added, mut wished) = (0usize, 0usize);
         for (i, mark) in picked {
-            let rec = &recs[i];
-            self.footer_say(&format!(" Looking up {}…", rec.title), 81);
-            let Some(item) = self.resolve_rec(rec) else { missed += 1; continue };
+            // Already resolved when availability was checked, so adding
+            // costs no further TMDB round-trip.
+            let item = hits[i].item.clone();
             let is_series = item.kind == "tv";
             let list = if is_series { &mut self.db.series } else { &mut self.db.movies };
             if !list.iter().any(|it| it.id == item.id) {
@@ -1820,7 +1838,6 @@ impl App {
         self.render_all();
         let mut msg = format!(" Added {} to the list", added);
         if wished > 0 { msg.push_str(&format!(", {} to the wish list", wished)); }
-        if missed > 0 { msg.push_str(&format!(" \u{b7} {} not found on TMDB", missed)); }
         self.footer_say(&msg, 46);
     }
 
@@ -1834,19 +1851,6 @@ impl App {
             .find(|it| norm(&it.title) == want && (year == 0 || it.year == 0 || (it.year - year).abs() <= 1))
     }
 
-    /// Turn a recommended title into a real catalog row via TMDB. Prefers
-    /// a hit of the right kind whose year matches; a recommendation is a
-    /// title and a year, and TMDB will happily return a remake.
-    fn resolve_rec(&self, rec: &claude::Rec) -> Option<ListItem> {
-        let hits = scrape::search_keyed(&rec.title, 10, &self.cfg.tmdb_key);
-        if hits.is_empty() { return None; }
-        let same_kind: Vec<&scrape::SearchHit> =
-            hits.iter().filter(|h| h.item.kind == rec.kind).collect();
-        let pool = if same_kind.is_empty() { hits.iter().collect::<Vec<_>>() } else { same_kind };
-        let exact = pool.iter().find(|h| rec.year > 0 && h.item.year == rec.year);
-        let close = pool.iter().find(|h| rec.year > 0 && (h.item.year - rec.year).abs() <= 1);
-        Some(exact.or(close).unwrap_or(&pool[0]).item.clone())
-    }
 
     /// Show only the titles I have scored, best first. Turning it on
     /// switches the sort too — a rated-only list ordered by TMDB's score
@@ -1994,15 +1998,42 @@ impl App {
         let genres = format!("{}{}",
             claude::view_rule(&self.cfg.view),
             claude::genre_rule(&self.cfg.genres_include, &self.cfg.genres_exclude));
-        let prompt = claude::recommend_prompt(&self.taste(), 8, &want, &genres);
+        // Ask for more than fit on screen: the region check below throws
+        // away everything that does not stream here, and a bare handful
+        // of picks can come back with nothing left.
+        const ASK_FOR: usize = 14;
+        let prompt = claude::recommend_prompt(
+            &self.taste(), ASK_FOR, &want, &genres, &self.cfg.region);
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || { let _ = tx.send(claude::ask(&prompt)); });
+        let key = self.cfg.tmdb_key.clone();
+        let region = self.cfg.region.clone();
+        std::thread::spawn(move || {
+            // Claude names titles; TMDB says where they play. Both calls
+            // belong on this thread so the list stays live meanwhile.
+            let payload = claude::ask(&prompt).map(|text| {
+                let recs = claude::parse_recs(&text);
+                let asked = recs.len();
+                let hits: Vec<RecHit> = recs.into_iter().filter_map(|rec| {
+                    let item = resolve_rec_keyed(&rec, &key)?;
+                    let d = scrape::fetch_details_keyed(
+                        &item.id, Some(item.kind.as_str()), &region, &key);
+                    Some(RecHit { rec, providers: d.streaming, item })
+                }).collect();
+                (text, asked, hits)
+            });
+            let _ = tx.send(payload);
+        });
         self.recs_rx = Some(rx);
         let scope = claude::genre_label(&self.cfg.genres_include, &self.cfg.genres_exclude);
-        if scope.is_empty() {
-            self.footer_say(" Asking Claude for recommendations…", 81);
+        let where_ = if self.cfg.region.is_empty() {
+            String::new()
         } else {
-            self.footer_say(&format!(" Asking Claude for recommendations — {}", scope), 81);
+            format!(", then what streams in {}", self.cfg.region)
+        };
+        if scope.is_empty() {
+            self.footer_say(&format!(" Asking Claude{}…", where_), 81);
+        } else {
+            self.footer_say(&format!(" Asking Claude — {}{}…", scope, where_), 81);
         }
     }
 
@@ -2141,4 +2172,36 @@ fn move_bounded(idx: &mut usize, n: i32, total: usize) {
     if total == 0 { *idx = 0; return; }
     let new = (*idx as i32 + n).clamp(0, total as i32 - 1);
     *idx = new as usize;
+}
+
+/// One of Claude's picks, resolved: the catalog row it means, and where
+/// it streams in the configured region.
+struct RecHit {
+    rec: claude::Rec,
+    item: ListItem,
+    providers: Vec<String>,
+}
+
+/// Providers as they fit on one list row: two names, then a count.
+fn short_providers(p: &[String]) -> String {
+    match p.len() {
+        0 => String::new(),
+        1 | 2 => p.join(", "),
+        _ => format!("{}, +{}", p[..2].join(", "), p.len() - 2),
+    }
+}
+
+/// Turn a recommended title into a real catalog row via TMDB. Prefers a
+/// hit of the right kind whose year matches; a recommendation is a title
+/// and a year, and TMDB will happily return a remake. A free function so
+/// the recommendation worker can call it off the UI thread.
+fn resolve_rec_keyed(rec: &claude::Rec, tmdb_key: &str) -> Option<ListItem> {
+    let hits = scrape::search_keyed(&rec.title, 10, tmdb_key);
+    if hits.is_empty() { return None; }
+    let same_kind: Vec<&scrape::SearchHit> =
+        hits.iter().filter(|h| h.item.kind == rec.kind).collect();
+    let pool = if same_kind.is_empty() { hits.iter().collect::<Vec<_>>() } else { same_kind };
+    let exact = pool.iter().find(|h| rec.year > 0 && h.item.year == rec.year);
+    let close = pool.iter().find(|h| rec.year > 0 && (h.item.year - rec.year).abs() <= 1);
+    Some(exact.or(close).unwrap_or(&pool[0]).item.clone())
 }
