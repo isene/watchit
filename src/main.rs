@@ -105,6 +105,8 @@ fn main() {
             "DEL" | "BACK" => { app.rate(0); app.render_all(); }
             "c" => { app.recommend(); }
             "C" => { app.discuss(); }
+            // Ctrl+A, as in every Fe2O3 app: the full Claude session.
+            "C-A" => { app.discuss(); }
             "r" => { app.set_rating_min(); app.render_all(); }
             "y" => { app.set_year_min(); app.render_all(); }
             "Y" => { app.set_year_max(); app.render_all(); }
@@ -2130,7 +2132,7 @@ impl App {
   m              Show only what I have rated, best first
   c              Ask Claude what to watch next, then pick from the
                  answer: ENTER adds to the list, w adds + wishlists
-  C              Discuss recommendations with Claude
+  C  Ctrl-A      Discuss recommendations with Claude
                  (both stay in the current view and genre filter)
 
 {}

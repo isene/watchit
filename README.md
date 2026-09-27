@@ -112,6 +112,7 @@ a rating made on the phone never reaches the imported row.
 | `m` | Show only titles I have rated, best first |
 | `c` | Ask Claude what to watch next, then pick: ENTER adds, `w` adds + wishlists |
 | `C` | Discuss recommendations with Claude (same scope) |
+| `Ctrl-A` | The same, as in every Fe₂O₃ app |
 | `l` | Toggle Movies / Series view |
 | `o` | Cycle sort (TMDB rating / alphabetical / my rating) |
 | `r` | Set minimum rating |
