@@ -9,7 +9,7 @@ fn watchit_dir() -> PathBuf {
 pub fn config_path() -> PathBuf { watchit_dir().join("config.yml") }
 pub fn data_dir() -> PathBuf { watchit_dir().join("data") }
 pub fn list_path() -> PathBuf { data_dir().join("list.json") }
-pub fn details_path() -> PathBuf { data_dir().join("details.json") }
+pub fn store_dir() -> PathBuf { data_dir().join("watchit.ferrite") }
 /// Shared with the phone (Syncthing folder `watchit`). Only small,
 /// device-owned files belong here — see `ratings.rs`.
 pub fn sync_dir() -> PathBuf { watchit_dir().join("sync") }

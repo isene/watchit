@@ -168,14 +168,17 @@ set, pick the region for streaming-availability lookups:
 ~/.watchit/
 ├── config.yml           # Your preferences (incl. tmdb_key, region)
 ├── data/
-│   ├── list.json        # Movie + series metadata (title, rating, year, genres)
-│   ├── details.json     # Per-title details cache
+│   ├── watchit.ferrite/ # The lists and the details, in a ferrite database
 │   └── *.jpg            # Poster images (TMDB IDs)
 └── sync/
     ├── ratings-*.json   # My ratings, one file per device (shared with the phone)
     ├── catalog-*.json   # The list itself, one file per device
     └── tmdb_key.txt     # So the phone never needs the key typed in
 ```
+
+The lists and details live in [ferrite](https://github.com/isene/ferrite),
+so a save writes only the titles that changed. Since 0.8.0: on the first
+start the old `list.json` and `details.json` are copied in, and left as they were.
 
 ### The phone
 
