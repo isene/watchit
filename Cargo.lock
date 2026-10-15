@@ -161,10 +161,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fe2o3-ferrite"
-version = "0.2.0"
-
-[[package]]
 name = "fe2o3-glow"
 version = "0.1.49"
 dependencies = [
@@ -894,10 +890,9 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "watchit"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "fe2o3-crust",
- "fe2o3-ferrite",
  "fe2o3-glow",
  "regex",
  "serde",

@@ -44,14 +44,10 @@ fn main() {
     };
 
     let cfg = Config::load();
-    let store = match data::Store::open(&config::store_dir()) {
-        Ok(s) => s,
-        Err(e) => { eprintln!("watchit: {}", e); std::process::exit(1); }
-    };
 
     Crust::init();
     Crust::set_app_identity("Watchit");
-    let mut app = App::new(cfg, store);
+    let mut app = App::new(cfg);
     app.load_all();
 
     if let Some(n) = app.shared_note.take() {
@@ -144,7 +140,6 @@ enum Focus { List, Genres, Wish, Dump }
 
 struct App {
     cfg: Config,
-    store: data::Store,
     db: Database,
     details: DetailsCache,
     cols: u16,
@@ -221,12 +216,11 @@ enum ScrapeResult {
 type Migration = (String, ListItem);
 
 impl App {
-    fn new(cfg: Config, store: data::Store) -> Self {
+    fn new(cfg: Config) -> Self {
         let (cols, rows) = Crust::terminal_size();
         let (header, list, genres, wish, dump, detail, footer) = Self::build_panes(cols, rows);
         Self {
             cfg,
-            store,
             db: Database::default(),
             details: DetailsCache::new(),
             cols, rows,
@@ -303,8 +297,8 @@ impl App {
     }
 
     fn load_all(&mut self) {
-        self.db = self.store.list();
-        self.details = self.store.details();
+        self.db = Database::load(&config::list_path());
+        self.details = data::load_details_cache(&config::details_path());
         self.drop_mismatched_details();
         self.ratings = ratings::Ratings::load(&config::sync_dir());
         // Whatever the phone has added since we last looked.
@@ -312,7 +306,7 @@ impl App {
         self.namespace_series_cache();
         let added = share::merge_others(&sync, &mut self.db);
         if added > 0 {
-            self.store.save_list(&self.db);
+            self.db.save(&config::list_path());
             self.shared_note = Some(added);
         }
         // A device with no key of its own takes the one already shared;
@@ -351,7 +345,7 @@ impl App {
             self.details.remove(id);
             self.drop_cached_poster(id);
         }
-        self.store.save_details(&self.details);
+        data::save_details_cache(&config::details_path(), &self.details);
     }
 
     /// Move each series' cached data onto its namespaced key.
@@ -392,7 +386,7 @@ impl App {
             if same { self.ratings.rekey(&old, &new, &title, year); }
         }
         if moved > 0 {
-            self.store.save_details(&self.details);
+            data::save_details_cache(&config::details_path(), &self.details);
         }
     }
 
@@ -1271,7 +1265,7 @@ impl App {
                 if dup { false } else { kept.push((key, it.year)); true }
             });
         }
-        self.store.save_list(&self.db);
+        self.db.save(&config::list_path());
         self.rebuild_genres();
         self.rebuild_filtered();
         let gone = before - (self.db.movies.len() + self.db.series.len());
@@ -1410,7 +1404,7 @@ impl App {
                 Ok(ScrapeResult::Full(movies, series)) => {
                     self.db.movies = movies;
                     self.db.series = series;
-                    self.store.save_list(&self.db);
+                    self.db.save(&config::list_path());
                     self.rebuild_genres();
                     self.rebuild_filtered();
                     let n = self.db.movies.len() + self.db.series.len();
@@ -1442,7 +1436,7 @@ impl App {
                 // list.json every batch: it is small, and it is what makes
                 // an interrupted migration resume instead of restart.
                 // details.json is half a megabyte, so it waits for the end.
-                self.store.save_list(&self.db);
+                self.db.save(&config::list_path());
                 self.cfg.save();
                 let left = self.db.movies.iter().chain(self.db.series.iter())
                     .filter(|it| it.id.starts_with("tt")).count();
@@ -1450,7 +1444,7 @@ impl App {
                 changed = true;
             }
             if finished {
-                self.store.save_details(&self.details);
+                data::save_details_cache(&config::details_path(), &self.details);
                 share::write_mine(&config::sync_dir(), &self.db, &self.details);
                 // Two rows can now share an id — the imported copy and the
                 // TMDB one it just became. Collapse them.
@@ -1496,7 +1490,7 @@ impl App {
                         // interrupted — and the whole point of the sweep is
                         // that it is long.
                         if self.details_since_save >= 50 {
-                            self.store.save_details(&self.details);
+                            data::save_details_cache(&config::details_path(), &self.details);
                             let left = self.db.movies.iter().chain(self.db.series.iter())
                                 .filter(|it| self.needs_details(it)).count();
                             self.footer_say(&format!(" Fetching details… {} left", left), 81);
@@ -1507,7 +1501,7 @@ impl App {
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
                         self.details_since_save = 0;
-                        self.store.save_details(&self.details);
+                        data::save_details_cache(&config::details_path(), &self.details);
                         self.save_catalog();
                         self.rebuild_genres();
                         self.rebuild_filtered();
@@ -1591,7 +1585,7 @@ impl App {
     /// The catalog changed: persist it, and republish it to the folder
     /// the phone reads. Called where titles are added, never per render.
     fn save_catalog(&mut self) {
-        self.store.save_list(&self.db);
+        self.db.save(&config::list_path());
         share::write_mine(&config::sync_dir(), &self.db, &self.details);
     }
 

@@ -227,11 +227,8 @@ impl Ratings {
 
     /// Write only this device's file — never anyone else's.
     fn save(&self) {
-        if let Some(parent) = self.mine.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if let Ok(s) = serde_json::to_string_pretty(&self.map) {
-            let _ = std::fs::write(&self.mine, s);
+            crate::data::write_whole(&self.mine, &s);
         }
     }
 }

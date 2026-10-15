@@ -67,9 +67,8 @@ pub fn write_mine(dir: &Path, db: &Database, details: &DetailsCache) {
         movies: with_posters(&db.movies),
         series: with_posters(&db.series),
     };
-    let _ = std::fs::create_dir_all(dir);
     if let Ok(s) = serde_json::to_string_pretty(&out) {
-        let _ = std::fs::write(mine(dir), s);
+        crate::data::write_whole(&mine(dir), &s);
     }
 }
 
