@@ -32,6 +32,11 @@ pub struct Entry {
     pub title: String,
     #[serde(default)]
     pub year: i32,
+    /// Why I gave that score, in my own words ("too slow"). There is no
+    /// key to type one; it is written into the file by hand or by Claude,
+    /// and goes to Claude with the score.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub comment: String,
 }
 
 /// Key for the title fallback — see `data::normalize_title`.
@@ -103,6 +108,10 @@ pub fn merge_into(dst: &mut Map, src: Map) {
                 let newer = e.ts > old.ts
                     || (e.ts == old.ts && key.starts_with("tt") && !id.starts_with("tt"));
                 if !newer { continue; }
+                // The phone knows no comments, so a newer score from it
+                // must not wipe the one written here.
+                let mut e = e;
+                if e.comment.is_empty() { e.comment = old.comment.clone(); }
                 // Keep one entry, under the better id.
                 let winner = if key.starts_with("tt") && !id.starts_with("tt") { id } else { key.clone() };
                 dst.remove(&key);
@@ -177,9 +186,10 @@ impl Ratings {
             false => self.id_by_title(title, year).cloned()
                 .unwrap_or_else(|| id.to_string()),
         };
+        let comment = self.map.get(&key).map(|e| e.comment.clone()).unwrap_or_default();
         self.map.insert(key, Entry {
             score: score.min(10), ts: now(),
-            title: title.to_string(), year,
+            title: title.to_string(), year, comment,
         });
         self.reindex();
         self.save();
@@ -238,7 +248,35 @@ mod tests {
     use super::*;
 
     fn e(score: u8, ts: i64, title: &str, year: i32) -> Entry {
-        Entry { score, ts, title: title.into(), year }
+        Entry { score, ts, title: title.into(), year, comment: String::new() }
+    }
+
+    #[test]
+    fn a_comment_outlives_a_newer_score_without_one() {
+        // The phone re-rates a title but writes no comment field. The
+        // score moves; the reason given here stays.
+        let mut dst: Map = HashMap::new();
+        let mut with = e(6, 100, "A", 1990);
+        with.comment = "too slow".into();
+        dst.insert("t1".into(), with);
+        let mut src: Map = HashMap::new();
+        src.insert("t1".into(), e(7, 200, "A", 1990));
+        merge_into(&mut dst, src);
+        assert_eq!(dst["t1"].score, 7);
+        assert_eq!(dst["t1"].comment, "too slow");
+    }
+
+    #[test]
+    fn re_rating_keeps_the_comment() {
+        let dir = std::env::temp_dir().join(format!("watchit-comment-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ratings-x.json"),
+            r#"{"t1":{"score":6,"ts":100,"title":"A","year":1990,"comment":"too slow"}}"#).unwrap();
+        let mut r = Ratings::load(&dir);
+        r.set("t1", "A", 1990, 8);
+        assert_eq!(r.rated()[0].1.comment, "too slow");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

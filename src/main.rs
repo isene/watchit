@@ -1914,7 +1914,7 @@ impl App {
         if let Some((it, kind)) = self.any_lookup(id) {
             return Some(claude::Seen {
                 title: it.title.clone(), year: self.item_year(it),
-                kind: kind.to_string(), score,
+                kind: kind.to_string(), score, comment: String::new(),
             });
         }
         // Dropped from the catalog but still rated / wished: the details
@@ -1922,7 +1922,7 @@ impl App {
         self.details.get(&self.key_of(id)).map(|d| claude::Seen {
             title: d.title.clone(), year: d.year,
             kind: if d.kind == "TVSeries" { "Series".into() } else { "Movie".into() },
-            score,
+            score, comment: String::new(),
         })
     }
 
@@ -1950,10 +1950,13 @@ impl App {
         // Fall back to the title stored in the rating itself: a rating
         // that came from the phone carries an id this catalog never had.
         let rated: Vec<claude::Seen> = self.ratings.rated().into_iter()
-            .map(|(id, e)| self.seen_of(&id, Some(e.score)).unwrap_or(claude::Seen {
-                title: e.title.clone(), year: e.year,
-                kind: "Movie or series".into(), score: Some(e.score),
-            }))
+            .map(|(id, e)| {
+                let seen = self.seen_of(&id, Some(e.score)).unwrap_or(claude::Seen {
+                    title: e.title.clone(), year: e.year,
+                    kind: "Movie or series".into(), score: Some(e.score), comment: String::new(),
+                });
+                claude::Seen { comment: e.comment.clone(), ..seen }
+            })
             .collect();
         let ids = |v: &Vec<String>| -> Vec<claude::Seen> {
             v.iter().filter_map(|id| {

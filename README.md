@@ -202,6 +202,12 @@ do not share an id space — a catalog imported from IMDB-terminal still holds
 `tt…` ids while the phone keys everything by TMDB id. The title bridges them,
 so the same film is one rating on both devices either way.
 
+A rating can also carry a `comment`, your reason in your own words
+(`"comment": "too slow"`). There is no key for it: write it into a ratings
+file by hand, or have Claude do it. The `c` and `C` recommendations see it
+next to the score, so "too slow" steers the next picks. Re-rating a title,
+here or on the phone, keeps its comment.
+
 ## Data Sources
 
 All data comes from a single backbone:

@@ -19,15 +19,18 @@ pub struct Seen {
     pub year: i32,
     pub kind: String,
     pub score: Option<u8>,
+    /// My reason for the score, if I gave one.
+    pub comment: String,
 }
 
 impl Seen {
     fn line(&self) -> String {
         let year = if self.year > 0 { format!(" ({})", self.year) } else { String::new() };
-        match self.score {
+        let line = match self.score {
             Some(s) => format!("{}{} — {}/10", self.title, year, s),
             None => format!("{}{}", self.title, year),
-        }
+        };
+        if self.comment.is_empty() { line } else { format!("{} — \"{}\"", line, self.comment) }
     }
 }
 
@@ -278,6 +281,17 @@ pub fn available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_comment_reaches_the_taste_profile() {
+        let seen = |comment: &str| Seen {
+            title: "Dark".into(), year: 2017, kind: "Series".into(),
+            score: Some(6), comment: comment.into(),
+        };
+        let t = taste(&[seen("too slow")], &[], &[]);
+        assert!(t.contains("- Dark (2017) — 6/10 — \"too slow\" [Series]"), "{}", t);
+        assert!(!taste(&[seen("")], &[], &[]).contains('"'), "no comment, no quotes");
+    }
 
     #[test]
     fn parses_the_format_the_prompt_asks_for() {
