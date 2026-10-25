@@ -86,6 +86,7 @@ a rating made on the phone never reaches the imported row.
 - **Poster display** inline in the detail pane (kitty/sixel/w3m via glow)
 - **Genre filtering**: include (`+`), exclude (`-`), or clear (`Space`) on the highlighted genre
 - **My own ratings** — score any title 1-10 with a single keypress, sorted and synced
+- **More than one person** (`p`, `P`), each with their own ratings, and `c` picks for any mix of them
 - **Claude recommendations** (`c`) grounded in what you rated, scoped to the current view and genre filter, and picked from: ENTER adds a title to the list, `w` adds it and wishlists it
 - **A conversation about what to watch** (`C`), seeded with the same taste profile
 - **Rating / year filters**, sort by TMDB rating, alphabetical, or my rating
@@ -110,6 +111,8 @@ a rating made on the phone never reaches the imported row.
 | `0` | Rate it 10 |
 | `DEL` | Clear my rating |
 | `m` | Show only titles I have rated, best first |
+| `p` | Rate as the next person (the name at the top right) |
+| `P` | Add a person, starting as a copy of the current one |
 | `c` | Ask Claude what to watch next, then pick: ENTER adds, `w` adds + wishlists |
 | `C` | Discuss recommendations with Claude (same scope) |
 | `Ctrl-A` | The same, as in every Fe₂O₃ app |
@@ -174,6 +177,8 @@ set, pick the region for streaming-availability lookups:
 └── sync/
     ├── ratings-*.json   # My ratings, one file per device (shared with the phone)
     ├── catalog-*.json   # The list itself, one file per device
+    ├── wish-*.json      # The wish lists, one file per device
+    ├── people/<name>/   # Someone else's ratings-*.json
     └── tmdb_key.txt     # So the phone never needs the key typed in
 ```
 
@@ -193,6 +198,20 @@ separately and neither ever means "delete what I do not have", so nothing is
 dropped and empty fields (year, genres, poster) are backfilled from whichever
 device did the fetch. It is written when titles are added and once on quit —
 the phone is not watching in real time.
+
+### More than one person
+
+Several people can rate. The name at the top right says whose ratings are on
+screen; `p` moves to the next person, and `P` adds one, starting as a copy of
+whoever is chosen now. Each person's files live in `people/<name>/` in the
+sync folder, so the phone sees them too. Mine stay at the top, where they
+always were. Wish and dump lists are shared by everyone.
+
+With more than one person, `c` first asks who the picks are for: Space
+ticks names, ENTER asks. Claude gets each person's ratings and picks what
+all of them would enjoy together. `C` talks about the person chosen now.
+
+### The wish lists
 
 The wish lists travel too, in `wish-<device>.json`. Each title on or off
 a list carries the time it was put there, and the newest wins, so taking a

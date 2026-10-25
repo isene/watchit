@@ -12,6 +12,9 @@
 //! Clearing a rating stores score 0 with a fresh timestamp — a
 //! tombstone. Dropping the entry instead would let the other device's
 //! older rating win the next merge and resurrect it.
+//!
+//! Other people in the house get the same files in a folder of their
+//! own, `people/<name>/`. Mine stay at the top, where they always were.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -119,6 +122,28 @@ pub fn merge_into(dst: &mut Map, src: Map) {
             }
         }
     }
+}
+
+/// The folder holding one person's ratings. "" is me.
+pub fn person_dir(sync: &Path, person: &str) -> PathBuf {
+    if person.is_empty() { sync.to_path_buf() } else { sync.join("people").join(person) }
+}
+
+/// Everyone besides me who has ratings of their own, A to Z.
+pub fn people(sync: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(sync.join("people")).into_iter().flatten().flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    v.sort();
+    v
+}
+
+/// A typed name made safe for a folder: letters, digits, space and dash.
+pub fn clean_name(raw: &str) -> String {
+    raw.chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-').collect::<String>()
+        .trim().to_string()
 }
 
 fn read_file(path: &Path) -> Map {
@@ -235,6 +260,16 @@ impl Ratings {
         self.map.values().filter(|e| e.score > 0).count()
     }
 
+    /// Start a new person as a copy of these ratings, scores, comments
+    /// and times alike. From there the two drift apart.
+    pub fn copy_to(&self, dir: &Path) -> bool {
+        if std::fs::create_dir_all(dir).is_err() { return false; }
+        let copy = Self { map: self.map.clone(), by_title: HashMap::new(),
+                          mine: dir.join(format!("ratings-{}.json", device())) };
+        copy.save();
+        true
+    }
+
     /// Write only this device's file — never anyone else's.
     fn save(&self) {
         if let Ok(s) = serde_json::to_string_pretty(&self.map) {
@@ -276,6 +311,23 @@ mod tests {
         let mut r = Ratings::load(&dir);
         r.set("t1", "A", 1990, 8);
         assert_eq!(r.rated()[0].1.comment, "too slow");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_person_starts_as_a_copy() {
+        let dir = std::env::temp_dir().join(format!("watchit-people-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut me = Ratings::load(&dir);
+        me.set("1", "Dune", 2021, 8);
+        assert!(me.copy_to(&person_dir(&dir, "Alice")));
+        let mut her = Ratings::load(&person_dir(&dir, "Alice"));
+        assert_eq!(her.get("1", "Dune", 2021), Some(8));
+        her.set("1", "Dune", 2021, 4);
+        assert_eq!(Ratings::load(&dir).get("1", "Dune", 2021), Some(8), "mine stay mine");
+        assert_eq!(people(&dir), vec!["Alice"]);
+        assert_eq!(clean_name(" Al/ice. "), "Alice");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -104,6 +104,8 @@ fn main() {
             "0" => { app.rate(10); app.render_all(); }
             "DEL" | "BACK" => { app.rate(0); app.render_all(); }
             "c" => { app.recommend(); }
+            "p" => { app.next_person(); app.render_all(); }
+            "P" => { app.add_person(); app.render_all(); }
             "C" => { app.discuss(); }
             // Ctrl+A, as in every Fe2O3 app: the full Claude session.
             "C-A" => { app.discuss(); }
@@ -137,6 +139,11 @@ fn main() {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Focus { List, Genres, Wish, Dump }
+
+/// How a person shows on screen: "" is me.
+fn person_label(person: &str) -> String {
+    if person.is_empty() { "Me".to_string() } else { person.to_string() }
+}
 
 struct App {
     cfg: Config,
@@ -190,6 +197,9 @@ struct App {
     /// My own 1-10 scores, merged across every device that writes into
     /// the shared sync folder.
     ratings: ratings::Ratings,
+    /// Whose ratings those are: "" is me, anyone else has a folder
+    /// under `sync/people/`. Every start is as me.
+    person: String,
     /// Who put what on a wish list, and when, across every device.
     wish_marks: share::Marks,
     /// A `claude -p` recommendation in flight. The TUI stays live while
@@ -241,6 +251,7 @@ impl App {
             prefetch_busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             poster_rx: None,
             ratings: ratings::Ratings::default(),
+            person: String::new(),
             wish_marks: share::Marks::new(),
             recs_rx: None,
             shared_note: None,
@@ -303,7 +314,7 @@ impl App {
         self.db = Database::load(&config::list_path());
         self.details = data::load_details_cache(&config::details_path());
         self.drop_mismatched_details();
-        self.ratings = ratings::Ratings::load(&config::sync_dir());
+        self.ratings = ratings::Ratings::load(&ratings::person_dir(&config::sync_dir(), &self.person));
         // Whatever the phone has added since we last looked.
         let sync = config::sync_dir();
         self.wish_marks = share::load_wish(&sync);
@@ -513,7 +524,13 @@ impl App {
         let counts = format!("M:{}  S:{}", self.db.movies.len(), self.db.series.len());
         let scope = if self.only_rated { "  \u{2605} rated only" } else { "" };
         let text = format!(" watchit  [{}{}]  {}  •  {}", view, scope, filter, counts);
-        self.header.say(&style::bold(&text));
+        // Whose ratings are on screen, at the right end. Anyone but me
+        // stands out, so a score never lands on the wrong person.
+        let who = format!("{} \u{25be} ", person_label(&self.person));
+        let pad = (self.header.w as usize).saturating_sub(text.chars().count() + who.chars().count());
+        let colour = if self.person.is_empty() { 252 } else { 226 };
+        self.header.say(&format!("{}{}{}", style::bold(&text), " ".repeat(pad),
+                                 style::bold(&style::fg(&who, colour))));
     }
 
     fn render_list(&mut self) {
@@ -1954,19 +1971,19 @@ impl App {
         if score == 0 {
             self.footer_say(&format!(" Cleared my rating for {}", title), 244);
         } else {
-            self.footer_say(&format!(" {} — my rating: {}/10", title, score), 46);
+            let whose = if self.person.is_empty() { "my".to_string() } else { format!("{}'s", self.person) };
+            self.footer_say(&format!(" {} — {} rating: {}/10", title, whose, score), 46);
         }
         if self.cfg.sort == "mine" { self.rebuild_filtered(); }
     }
 
     // --- Claude ---
 
-    /// Everything Claude needs to know about my taste: what I scored,
-    /// what I already want, what I threw out.
-    fn taste(&self) -> String {
+    /// What one person scored, as Claude reads it.
+    fn rated_by(&self, r: &ratings::Ratings) -> Vec<claude::Seen> {
         // Fall back to the title stored in the rating itself: a rating
         // that came from the phone carries an id this catalog never had.
-        let rated: Vec<claude::Seen> = self.ratings.rated().into_iter()
+        r.rated().into_iter()
             .map(|(id, e)| {
                 let seen = self.seen_of(&id, Some(e.score)).unwrap_or(claude::Seen {
                     title: e.title.clone(), year: e.year,
@@ -1974,11 +1991,20 @@ impl App {
                 });
                 claude::Seen { comment: e.comment.clone(), ..seen }
             })
+            .collect()
+    }
+
+    /// Everything Claude needs to know about the taste of `group`: what
+    /// each of them scored, what we already want, what we threw out.
+    fn taste(&self, group: &[(String, &ratings::Ratings)]) -> String {
+        let people: Vec<(String, Vec<claude::Seen>)> = group.iter()
+            .map(|(name, r)| (name.clone(), self.rated_by(r)))
             .collect();
         let ids = |v: &Vec<String>| -> Vec<claude::Seen> {
             v.iter().filter_map(|id| {
                 let seen = self.seen_of(id, None)?;
-                let score = self.ratings.get(&self.key_of(id), &seen.title, seen.year);
+                let score = group.iter()
+                    .find_map(|(_, r)| r.get(&self.key_of(id), &seen.title, seen.year));
                 Some(claude::Seen { score, ..seen })
             }).collect()
         };
@@ -1996,7 +2022,66 @@ impl App {
         dump.retain(|d| d.score.is_none());
         // The bin is a bin, not a profile — a few dozen is plenty.
         dump.truncate(60);
-        claude::taste(&rated, &wish, &dump)
+        claude::taste(&people, &wish, &dump)
+    }
+
+    /// Who the `c` picks are for. With nobody but me there is nothing
+    /// to ask; otherwise Space ticks names and ENTER goes. None on ESC.
+    fn pick_people(&mut self) -> Option<Vec<String>> {
+        let mut all = vec![String::new()];
+        all.extend(ratings::people(&config::sync_dir()));
+        if all.len() == 1 { return Some(all); }
+        let mut ticked: Vec<bool> = all.iter().map(|p| *p == self.person).collect();
+        let infos = vec!["Space ticks or unticks a name. ENTER asks Claude for everyone ticked, \
+                          or for the highlighted name when none is.".to_string(); all.len()];
+        let mut idx = ticked.iter().position(|t| *t).unwrap_or(0);
+        self.clear_poster();
+        loop {
+            let rows: Vec<String> = all.iter().zip(&ticked)
+                .map(|(p, t)| format!("[{}] {}", if *t { "x" } else { " " }, person_label(p)))
+                .collect();
+            let (i, key) = self.pick_from("Recommend for", &rows, &infos, &["SPACE", " ", "ENTER"], idx)?;
+            idx = i;
+            if key != "ENTER" { ticked[i] = !ticked[i]; continue; }
+            if !ticked.contains(&true) { ticked[i] = true; }
+            return Some(all.into_iter().zip(ticked).filter(|(_, t)| *t).map(|(p, _)| p).collect());
+        }
+    }
+
+    fn next_person(&mut self) {
+        let mut all = vec![String::new()];
+        all.extend(ratings::people(&config::sync_dir()));
+        if all.len() == 1 {
+            self.footer_say(" Nobody else yet: P adds a person", 226);
+            return;
+        }
+        let i = all.iter().position(|p| *p == self.person).map(|i| (i + 1) % all.len()).unwrap_or(0);
+        self.switch_person(all[i].clone());
+    }
+
+    /// A new person starts as a copy of whoever is chosen now.
+    fn add_person(&mut self) {
+        let from = person_label(&self.person);
+        let raw = self.footer.ask(&format!(" New person (starts as a copy of {}): ", from), "");
+        let name = ratings::clean_name(&raw);
+        if name.is_empty() || name.eq_ignore_ascii_case("me") { return; }
+        let dir = ratings::person_dir(&config::sync_dir(), &name);
+        if dir.exists() {
+            self.footer_say(&format!(" {} is already there: p switches to them", name), 226);
+            return;
+        }
+        if !self.ratings.copy_to(&dir) {
+            self.footer_say(&format!(" Could not create {}", dir.display()), 196);
+            return;
+        }
+        self.switch_person(name);
+    }
+
+    fn switch_person(&mut self, person: String) {
+        self.person = person;
+        self.ratings = ratings::Ratings::load(&ratings::person_dir(&config::sync_dir(), &self.person));
+        self.rebuild_filtered();
+        self.footer_say(&format!(" Rating as {}", person_label(&self.person)), 46);
     }
 
     /// One-shot recommendations. Runs off the UI thread so the TUI stays
@@ -2010,10 +2095,22 @@ impl App {
             self.footer_say(" Recommendations need the `claude` CLI on PATH", 196);
             return;
         }
-        if self.ratings.count() == 0 {
+        let Some(picked) = self.pick_people() else { self.render_all(); return };
+        self.render_all();
+        // The chosen person's ratings are loaded already; read the rest.
+        let sync = config::sync_dir();
+        let others: Vec<(String, Option<ratings::Ratings>)> = picked.into_iter().map(|p| {
+            let r = (p != self.person).then(|| ratings::Ratings::load(&ratings::person_dir(&sync, &p)));
+            (p, r)
+        }).collect();
+        let group: Vec<(String, &ratings::Ratings)> = others.iter()
+            .map(|(p, r)| (p.clone(), r.as_ref().unwrap_or(&self.ratings)))
+            .collect();
+        if group.iter().all(|(_, r)| r.count() == 0) {
             self.footer_say(" Rate a few titles first (1-9, 0 = 10)", 226);
             return;
         }
+        let taste = self.taste(&group);
         let want = self.footer.ask(" In the mood for (blank = anything): ", "");
         // The genre filter scopes the recommendations too — the list on
         // screen obeys it, so the suggestions have to as well.
@@ -2025,7 +2122,7 @@ impl App {
         // of picks can come back with nothing left.
         const ASK_FOR: usize = 14;
         let prompt = claude::recommend_prompt(
-            &self.taste(), ASK_FOR, &want, &genres, &self.cfg.region);
+            &taste, ASK_FOR, &want, &genres, &self.cfg.region);
         let (tx, rx) = mpsc::channel();
         let key = self.cfg.tmdb_key.clone();
         let region = self.cfg.region.clone();
@@ -2070,7 +2167,7 @@ impl App {
         let genres = format!("{}{}",
             claude::view_rule(&self.cfg.view),
             claude::genre_rule(&self.cfg.genres_include, &self.cfg.genres_exclude));
-        let prompt = claude::discuss_prompt(&self.taste(), &genres);
+        let prompt = claude::discuss_prompt(&self.taste(&[(self.person.clone(), &self.ratings)]), &genres);
         self.clear_poster();
         // Give claude a clean terminal: same handshake amar and kastrup use.
         use std::io::Write as _;
@@ -2150,6 +2247,8 @@ impl App {
   0              Rate it 10
   DEL            Clear my rating
   m              Show only what I have rated, best first
+  p              Rate as the next person (name at the top right)
+  P              Add a person, starting as a copy of the current one
   c              Ask Claude what to watch next, then pick from the
                  answer: ENTER adds to the list, w adds + wishlists
   C  Ctrl-A      Discuss recommendations with Claude

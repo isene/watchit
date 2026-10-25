@@ -43,13 +43,27 @@ impl Seen {
 /// would have the model reading a 9 as evidence against my own taste.
 /// What is left is a refusal sight unseen — a limit on what to offer,
 /// which is a different thing from a low score and has to be said so.
-pub fn taste(rated: &[Seen], wish: &[Seen], dump: &[Seen]) -> String {
+pub fn taste(people: &[(String, Vec<Seen>)], wish: &[Seen], dump: &[Seen]) -> String {
     let mut s = String::new();
-    s.push_str("Here is my taste in movies and series.\n\nRATED (my own 1-10):\n");
-    if rated.is_empty() {
-        s.push_str("(nothing rated yet)\n");
-    } else {
-        for r in rated { s.push_str(&format!("- {} [{}]\n", r.line(), r.kind)); }
+    match people {
+        [(me, rated)] if me.is_empty() => {
+            s.push_str("Here is my taste in movies and series.\n\nRATED (my own 1-10):\n");
+            rated_lines(&mut s, rated);
+        }
+        _ => {
+            // The prompts that follow say "I" and "my"; this tells
+            // Claude who that is when it is not just me.
+            let who = who(people);
+            s.push_str(&format!(
+                "These recommendations are for {who}. Everywhere below, \"I\", \"me\" \
+                 and \"my\" mean {who}. When that is more than one person, pick \
+                 what all of them would enjoy watching together.\n"));
+            for (name, rated) in people {
+                let name = if name.is_empty() { "me".to_string() } else { name.clone() };
+                s.push_str(&format!("\nRATED BY {} (1-10):\n", name.to_uppercase()));
+                rated_lines(&mut s, rated);
+            }
+        }
     }
     if !wish.is_empty() {
         s.push_str("\nON MY WISH LIST (already want to see these — do not recommend them):\n");
@@ -67,6 +81,26 @@ pub fn taste(rated: &[Seen], wish: &[Seen], dump: &[Seen]) -> String {
         "\nI have seen everything under RATED, including anything I have since \
          binned — do not recommend any of it back to me.\n");
     s
+}
+
+fn rated_lines(s: &mut String, rated: &[Seen]) {
+    if rated.is_empty() {
+        s.push_str("(nothing rated yet)\n");
+    } else {
+        for r in rated { s.push_str(&format!("- {} [{}]\n", r.line(), r.kind)); }
+    }
+}
+
+/// "me", "Alice", "me and Alice", "me, Alice and Bob".
+fn who(people: &[(String, Vec<Seen>)]) -> String {
+    let names: Vec<String> = people.iter()
+        .map(|(n, _)| if n.is_empty() { "me".to_string() } else { n.clone() })
+        .collect();
+    match names.split_last() {
+        None => "me".into(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {}", rest.join(", "), last),
+    }
 }
 
 /// The genre filter as it is set right now. The list on screen obeys it,
@@ -288,9 +322,22 @@ mod tests {
             title: "Dark".into(), year: 2017, kind: "Series".into(),
             score: Some(6), comment: comment.into(),
         };
-        let t = taste(&[seen("too slow")], &[], &[]);
+        let me = |c: &str| vec![(String::new(), vec![seen(c)])];
+        let t = taste(&me("too slow"), &[], &[]);
         assert!(t.contains("- Dark (2017) — 6/10 — \"too slow\" [Series]"), "{}", t);
-        assert!(!taste(&[seen("")], &[], &[]).contains('"'), "no comment, no quotes");
+        assert!(!taste(&me(""), &[], &[]).contains('"'), "no comment, no quotes");
+    }
+
+    #[test]
+    fn a_group_gets_one_list_per_person() {
+        let seen = || Seen { title: "Dark".into(), year: 2017, kind: "Series".into(),
+                             score: Some(6), comment: String::new() };
+        let t = taste(&[(String::new(), vec![seen()]), ("Alice".into(), vec![])], &[], &[]);
+        assert!(t.contains("for me and Alice"), "{}", t);
+        assert!(t.contains("RATED BY ME (1-10):\n- Dark"), "{}", t);
+        assert!(t.contains("RATED BY ALICE (1-10):\n(nothing rated yet)"), "{}", t);
+        let alone = taste(&[("Alice".into(), vec![seen()])], &[], &[]);
+        assert!(alone.contains("mean Alice."), "{}", alone);
     }
 
     #[test]
