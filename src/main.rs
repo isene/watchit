@@ -190,6 +190,8 @@ struct App {
     /// My own 1-10 scores, merged across every device that writes into
     /// the shared sync folder.
     ratings: ratings::Ratings,
+    /// Who put what on a wish list, and when, across every device.
+    wish_marks: share::Marks,
     /// A `claude -p` recommendation in flight. The TUI stays live while
     /// it runs; the answer opens in a popup when it lands.
     /// Claude's answer, plus each recommendation resolved against TMDB
@@ -239,6 +241,7 @@ impl App {
             prefetch_busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             poster_rx: None,
             ratings: ratings::Ratings::default(),
+            wish_marks: share::Marks::new(),
             recs_rx: None,
             shared_note: None,
             details_since_save: 0,
@@ -303,6 +306,13 @@ impl App {
         self.ratings = ratings::Ratings::load(&config::sync_dir());
         // Whatever the phone has added since we last looked.
         let sync = config::sync_dir();
+        self.wish_marks = share::load_wish(&sync);
+        let before = (self.cfg.wish_movies.clone(), self.cfg.wish_series.clone());
+        let now = share::now();
+        let m = share::sync_wish(&mut self.wish_marks, "movies", &mut self.cfg.wish_movies, now);
+        let s = share::sync_wish(&mut self.wish_marks, "series", &mut self.cfg.wish_series, now);
+        if m || s { share::write_wish(&sync, &self.wish_marks); }
+        if before != (self.cfg.wish_movies.clone(), self.cfg.wish_series.clone()) { self.cfg.save(); }
         self.namespace_series_cache();
         let added = share::merge_others(&sync, &mut self.db);
         if added > 0 {
@@ -989,11 +999,13 @@ impl App {
     fn add_to_wish(&mut self, id: &str) {
         let list = if self.cfg.view == "movies" { &mut self.cfg.wish_movies } else { &mut self.cfg.wish_series };
         if !list.contains(&id.to_string()) { list.push(id.to_string()); }
+        share::mark_wish(&config::sync_dir(), &mut self.wish_marks, &self.cfg.view, id, true);
     }
     fn remove_from_wish(&mut self, id: &str) {
         let list = if self.cfg.view == "movies" { &mut self.cfg.wish_movies } else { &mut self.cfg.wish_series };
         list.retain(|x| x != id);
         if self.wish_idx >= list.len() { self.wish_idx = list.len().saturating_sub(1); }
+        share::mark_wish(&config::sync_dir(), &mut self.wish_marks, &self.cfg.view, id, false);
     }
     fn add_to_dump(&mut self, id: &str) {
         let list = if self.cfg.view == "movies" { &mut self.cfg.dump_movies } else { &mut self.cfg.dump_series };
@@ -1228,6 +1240,9 @@ impl App {
             for entry in lst.iter_mut() {
                 if entry == old { *entry = new.id.clone(); }
             }
+        }
+        if share::rekey_wish(&mut self.wish_marks, old, &new.id) {
+            share::write_wish(&config::sync_dir(), &self.wish_marks);
         }
         self.ratings.rekey(old, &new_key, &title, year);
     }
@@ -1831,6 +1846,8 @@ impl App {
             if mark == WISH {
                 let wish = if is_series { &mut self.cfg.wish_series } else { &mut self.cfg.wish_movies };
                 if !wish.contains(&item.id) { wish.push(item.id.clone()); wished += 1; }
+                let kind = if is_series { "series" } else { "movies" };
+                share::mark_wish(&config::sync_dir(), &mut self.wish_marks, kind, &item.id, true);
             }
         }
         self.save_catalog();

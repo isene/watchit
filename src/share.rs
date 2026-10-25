@@ -4,11 +4,12 @@
 //! all and writes only their own, so Syncthing never has two writers on
 //! one file to leave a `.sync-conflict-` copy of.
 //!
-//! Two things live here. The catalog — a union, never a mirror: each
+//! Three things live here. The catalog — a union, never a mirror: each
 //! device adds titles separately and neither ever means "delete what I
-//! do not have". And the TMDB key, so the phone does not need its own
-//! copy typed in by hand.
+//! do not have". The TMDB key, so the phone does not need its own copy
+//! typed in by hand. And the wish lists, where a removal travels too.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -113,6 +114,106 @@ fn merge_list(mine: &mut Vec<ListItem>, theirs: Vec<ListItem>) -> usize {
     added
 }
 
+// --- The wish lists ---
+//
+// Same rule again: `wish-<device>.json` per device, newest timestamp per
+// title wins. Unlike the catalog this is no union: taking a title off
+// the list is a mark of its own (`on: false`), or the other device's
+// older "on" would put it back.
+
+/// A title put on, or taken off, a wish list, and when.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Mark {
+    pub on: bool,
+    pub ts: i64,
+}
+
+/// Per list ("movies", "series"), per catalog id.
+pub type Marks = HashMap<String, HashMap<String, Mark>>;
+
+fn wish_file(dir: &Path) -> PathBuf { dir.join(format!("wish-{}.json", device())) }
+
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Every device's marks, merged.
+pub fn load_wish(dir: &Path) -> Marks {
+    let mut out = Marks::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return out };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let is_wish = p.file_name().and_then(|f| f.to_str())
+            .map(|n| n.starts_with("wish-") && n.ends_with(".json"))
+            .unwrap_or(false);
+        if !is_wish { continue; }
+        let Some(theirs) = std::fs::read_to_string(&p).ok()
+            .and_then(|s| serde_json::from_str::<Marks>(&s).ok()) else { continue };
+        for (kind, marks) in theirs {
+            let list = out.entry(kind).or_default();
+            for (id, m) in marks {
+                if list.get(&id).map(|old| m.ts > old.ts).unwrap_or(true) {
+                    list.insert(id, m);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Bring this device's wish list for `kind` in line with the marks.
+/// A title on the list that no device has marked yet (this list as it
+/// was before wish lists were shared) gets an "on" mark. Then the list
+/// keeps its order, loses what was taken off elsewhere, and gains what
+/// was put on elsewhere, oldest first. True when the marks changed and
+/// this device's file needs writing.
+pub fn sync_wish(marks: &mut Marks, kind: &str, list: &mut Vec<String>, now: i64) -> bool {
+    let m = marks.entry(kind.to_string()).or_default();
+    let mut changed = false;
+    for id in list.iter() {
+        if !m.contains_key(id) {
+            m.insert(id.clone(), Mark { on: true, ts: now });
+            changed = true;
+        }
+    }
+    list.retain(|id| m.get(id).map(|k| k.on).unwrap_or(false));
+    let mut gained: Vec<(i64, String)> = m.iter()
+        .filter(|(id, k)| k.on && !list.contains(id))
+        .map(|(id, k)| (k.ts, id.clone()))
+        .collect();
+    gained.sort();
+    list.extend(gained.into_iter().map(|(_, id)| id));
+    changed
+}
+
+/// Put a title on the list or take it off, and publish that.
+pub fn mark_wish(dir: &Path, marks: &mut Marks, kind: &str, id: &str, on: bool) {
+    marks.entry(kind.to_string()).or_default().insert(id.to_string(), Mark { on, ts: now() });
+    write_wish(dir, marks);
+}
+
+/// A title that moved from its IMDB id to its TMDB one takes its marks
+/// along. True when there was one to move.
+pub fn rekey_wish(marks: &mut Marks, old: &str, new: &str) -> bool {
+    let mut moved = false;
+    for list in marks.values_mut() {
+        if let Some(m) = list.remove(old) {
+            list.entry(new.to_string()).or_insert(m);
+            moved = true;
+        }
+    }
+    moved
+}
+
+pub fn write_wish(dir: &Path, marks: &Marks) {
+    if let Ok(s) = serde_json::to_string_pretty(marks) {
+        crate::data::write_whole(&wish_file(dir), &s);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +241,34 @@ mod tests {
         let shared = db.movies.iter().find(|i| i.id == "1").unwrap();
         assert_eq!(shared.year, 1990, "the missing year came from the other side");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn on(ts: i64) -> Mark { Mark { on: true, ts } }
+
+    #[test]
+    fn a_wish_travels_and_so_does_its_removal() {
+        let dir = std::env::temp_dir().join(format!("watchit-wish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The phone wished 2 and later took 1 off; this device knew 1 and 3.
+        std::fs::write(dir.join("wish-phone.json"), r#"{"series":{
+            "1":{"on":false,"ts":300}, "2":{"on":true,"ts":200}}}"#).unwrap();
+        std::fs::write(dir.join("wish-here.json"), r#"{"series":{
+            "1":{"on":true,"ts":100}, "3":{"on":true,"ts":100}}}"#).unwrap();
+        let mut marks = load_wish(&dir);
+        let mut list = vec!["1".to_string(), "3".to_string()];
+        assert!(!sync_wish(&mut marks, "series", &mut list, 999), "nothing new to publish");
+        assert_eq!(list, vec!["3", "2"], "1 taken off, 2 added at the end");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_first_sync_publishes_the_old_list() {
+        let mut marks = Marks::new();
+        let mut list = vec!["7".to_string()];
+        assert!(sync_wish(&mut marks, "movies", &mut list, 50));
+        assert_eq!(marks["movies"]["7"], on(50));
+        assert_eq!(list, vec!["7"]);
     }
 
     #[test]

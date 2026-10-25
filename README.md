@@ -194,6 +194,10 @@ dropped and empty fields (year, genres, poster) are backfilled from whichever
 device did the fetch. It is written when titles are added and once on quit —
 the phone is not watching in real time.
 
+The wish lists travel too, in `wish-<device>.json`. Each title on or off
+a list carries the time it was put there, and the newest wins, so taking a
+title off on one device takes it off the other. The dump lists stay local.
+
 The TMDB key is published here too, so the phone picks it up instead of having
 it typed in on a phone keyboard. A device that already has a key keeps it.
 
