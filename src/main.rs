@@ -65,7 +65,11 @@ fn main() {
     app.render_all();
 
     loop {
-        let Some(key) = Input::getchr(Some(1)) else {
+        // A timer only while a thread has work on its way; else nothing
+        // wakes watchit but a key.
+        let busy = app.recs_rx.is_some() || app.poster_rx.is_some() || app.scrape_rx.is_some()
+            || app.migrate_rx.is_some() || app.detail_rx.is_some();
+        let Some(key) = Input::getchr(busy.then_some(1)) else {
             if app.poll_async() { app.render_all(); }
             continue;
         };
