@@ -859,7 +859,7 @@ impl App {
             self.footer.say(&style::fg(msg, color));
         } else {
             let hint = " ?:Help  TAB:Focus  j/k:Move  1-9/0:Rate  m:Mine  +/-:Wish/Dump  /:Search  c/C:Claude  l:Movies/Series  o:Sort  q:Quit";
-            self.footer.say(&style::fg(hint, 245));
+            self.footer.say(&crust::with_version(&style::fg(hint, 245), self.footer.w as usize, "watchit", env!("CARGO_PKG_VERSION")));
         }
     }
 
